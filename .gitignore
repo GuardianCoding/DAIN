@@ -1,7 +1,58 @@
+# Python
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Secrets. DAIN_POOL_SECRET is referenced by NAME in cluster.toml and must
+# never have its value land here.
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.secret
+
+# Model weights. The headline model alone is 63 GB; nothing in this tree
+# belongs in git. Staged on gpu-01 and an external drive only.
+*.gguf
+*.gguf.part
+models/
+manifest.json
+SHA256SUMS
+
+# Planning docs. The brief is circulated directly, not versioned here.
+HIVE-master-brief.html
+DAIN-master-brief.html
+*-brief.html
+
+# Build output. llama.cpp is cloned beside the repo, never into it, but guard
+# against it anyway — a stray build/ is hundreds of MB.
+llama.cpp/
+build/
+*.o
+*.so
+*.dll
+*.exe
+
+# Benchmarks: infer/benchmarks/benchmarks.csv IS committed (INF-6, every
+# number on a slide reads out of it). Scratch runs are not.
+infer/benchmarks/scratch/
+*.log
+
+# Local tooling
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+
+# OS
 .DS_Store
+Thumbs.db
+desktop.ini
