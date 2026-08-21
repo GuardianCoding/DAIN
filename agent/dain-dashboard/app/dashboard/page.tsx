@@ -22,27 +22,12 @@ const nodes = [
     vram_total: 12000,
     backend: "vulkan",
     mem_bandwidth: 45.2,
-    tg_tok_s: 124.5,
+    tg_tok_s: 124.5, // update this with whatever live data Yusuff can provide
     pp_tok_s: 610.2,
     rtt_ms: 0.3,
     state: "joined",
   },
-  {
-    id: "office-01",
-    hostname: "office-pc-01",
-    cpu_name: "Intel i5-9500",
-    num_cores: 6,
-    ram_total: 16000,
-    ram_free: 9800,
-    gpu: null,
-    vram_total: 0,
-    backend: "cpu",
-    mem_bandwidth: 22.1,
-    tg_tok_s: 14.7,
-    pp_tok_s: 78.4,
-    rtt_ms: 0.4,
-    state: "joined",
-  },
+  
   
 ];
 
