@@ -14,3 +14,5 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.4",
 ]
+[tool.pytest.ini_options]
+pythonpath = ["."]
