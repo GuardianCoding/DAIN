@@ -39,3 +39,8 @@ def test_feed():
             "office-02",
             "mac-01",
         }
+
+        metrics = websocket.receive_json()
+        assert metrics["type"] == "metrics"
+        assert len(metrics["nodes"]) == 1
+        assert metrics["nodes"][0]["id"] == "gpu-01"
