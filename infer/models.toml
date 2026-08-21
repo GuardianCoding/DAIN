@@ -144,6 +144,22 @@ per-token network hop across N tokens. That is the only lever that attacks this
 cluster's actual cost structure. Timebox 90 minutes, as INF-5 says.
 """
 
+[models.working_spare]
+role            = "spare_quant"
+repo            = "unsloth/Qwen3.6-35B-A3B-GGUF"
+include         = "*Q5_K_M*.gguf"
+size_gb         = 25.0
+params_total_b  = 35.0
+params_active_b = 3.0
+priority        = 8
+claim           = "Not demoed. Insurance against the quantisation-over-RPC failure mode."
+notes = """
+Some Q4_K/Q5_K GGUFs hit assertion errors over RPC on awkward tensor shapes.
+A different quant of the SAME model turns a dead evening into a two-minute fix.
+Only worth carrying if the working model is what the demo depends on — which it
+is. Fetch it while you are on a fast link; you will never get it at the venue.
+"""
+
 [models.embed]
 role            = "embedding"
 repo            = "Qwen/Qwen3-Embedding-0.6B-GGUF"
