@@ -31,16 +31,20 @@ def test_feed():
         message = websocket.receive_json()
 
         assert {message["type"]} == {"topology"}
-        nodes = message["nodes"]
-        assert len(nodes) == 4
-        assert {node["id"] for node in nodes} == {
+        metrics_message = websocket.receive_json()
+
+        assert metrics_message["type"] == "metrics"
+
+        metrics = metrics_message["nodes"]
+        assert {metric["node_id"] for metric in metrics} == {
             "gpu-01",
             "office-01",
             "office-02",
             "mac-01",
         }
 
-        metrics = websocket.receive_json()
-        assert metrics["type"] == "metrics"
-        assert len(metrics["nodes"]) == 1
-        assert metrics["nodes"][0]["id"] == "gpu-01"
+        gpu_metrics = next(
+            metric for metric in metrics if metric["node_id"] == "gpu-01"
+        )
+        assert gpu_metrics["gpu_percent"] is not None
+        assert gpu_metrics["jobs_running"] == 1

@@ -1,12 +1,9 @@
+import asyncio
 from dataclasses import asdict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from ctl.mock import MOCK_NODES
-
-import asyncio
-
-import time
+from ctl.mock import MOCK_NODES, make_mock_metrics
 
 app = FastAPI()
 
@@ -34,20 +31,13 @@ async def send_feed(websocket: WebSocket):
     await websocket.send_json(response_payload)
     try:
         while True:
-            counter += 1
+            metrics = make_mock_metrics(counter)
             payload = {
-              "type": "metrics",
-              "timestamp": time.time(),
-              "nodes": [
-                {
-                  "id": "gpu-01",
-                  "cpu_percent": 25 + counter % 10,
-                  "ram_used_mb": 18432,
-                  "gpu_percent": 40 + counter % 10 
-                }
-              ]
+                "type": "metrics",
+                "nodes": [asdict(metric) for metric in metrics],
             }
             await websocket.send_json(payload)
+            counter += 1
             await asyncio.sleep(1)
 
     except WebSocketDisconnect:

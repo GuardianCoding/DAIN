@@ -1,4 +1,6 @@
-from contracts import NodeProfile
+import time
+
+from contracts import NodeMetrics, NodeProfile
 
 gpu_01 = NodeProfile(
     id="gpu-01",
@@ -78,3 +80,48 @@ MOCK_NODES = [
     office_02,
     mac_01,
 ]
+
+
+def make_mock_metrics(counter: int) -> list[NodeMetrics]:
+    timestamp = time.time()
+    step = counter % 10
+
+    return [
+        NodeMetrics(
+            node_id="gpu-01",
+            timestamp=timestamp,
+            cpu_percent=25.0 + step,
+            ram_free_mb=(46 * 1024) - (step * 64),
+            gpu_percent=40.0 + step,
+            vram_free_mb=(12 * 1024) - (step * 64),
+            jobs_running=1,
+        ),
+        NodeMetrics(
+            node_id="office-01",
+            timestamp=timestamp,
+            cpu_percent=15.0 + step,
+            ram_free_mb=(6 * 1024) - (step * 8),
+            gpu_percent=None,
+            vram_free_mb=None,
+            jobs_running=counter % 2,
+        ),
+        NodeMetrics(
+            node_id="office-02",
+            timestamp=timestamp,
+            cpu_percent=18.0 + step,
+            ram_free_mb=(6 * 1024) - (step * 8),
+            gpu_percent=None,
+            vram_free_mb=None,
+            jobs_running=(counter + 1) % 2,
+        ),
+        NodeMetrics(
+            node_id="mac-01",
+            timestamp=timestamp,
+            cpu_percent=20.0 + step,
+            ram_free_mb=(18 * 1024) - (step * 32),
+            gpu_percent=30.0 + step,
+            # Metal uses unified memory, so don't report separate VRAM.
+            vram_free_mb=None,
+            jobs_running=1,
+        ),
+    ]
