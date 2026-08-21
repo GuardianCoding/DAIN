@@ -92,7 +92,7 @@ def build_local_profile(node_id: str, fabric_ip: str) -> NodeProfile:
     )
 
 
-### rpc-server
+# rpc-server
 rpc_proc: subprocess.Popen | None = None
 
 
@@ -124,7 +124,7 @@ def cleanup_rpc_server():
 async def lifespan(app: FastAPI):
     global rpc_proc
     # Startup
-    rpc_proc = start_rpc_server("192.168.0.101", 50052)
+    rpc_proc = start_rpc_server("192.168.50.101", 50052)
     yield
     # Shutdown cleanup child
     cleanup_rpc_server()
@@ -136,9 +136,19 @@ signal.signal(signal.SIGINT, lambda s, f: (cleanup_rpc_server(), sys.exit(0)))
 signal.signal(signal.SIGTERM, lambda s, f: (cleanup_rpc_server(), sys.exit(0)))
 
 
+def get_fabric_ip(preferred_subet: str = "192.168.50.") -> str:
+    for iface, addrs in psutil.net_if_addrs().items():
+        for addr in addrs:
+            if addr.family == socket.AF_INET and addr.address.startswith(
+                preferred_subet
+            ):
+                return addr.address
+    return "127.0.0.1"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ctl", type=str, default="192.168.0.100:8000")
+    parser.add_argument("--ctl", type=str, default="192.168.50.100:8000")
     parser.add_argument("--port", type=int, default=9100)
     args = parser.parse_args()
 
@@ -149,3 +159,5 @@ if __name__ == "__main__":
     config = uvicorn.Config(app, host="0.0.0.0", port=args.port, loop="asyncio")
     server = uvicorn.Server(config)
     loop.run_until_complete(server.serve())
+
+    CURRENT_PROFILE = build_local_profile()
