@@ -33,11 +33,9 @@
   margin: 0;
 }
 
-.dots {
-  composes: dotRow from "./styles/shared.module.css";
-  margin-top: 34px;
+.pagebutton {
+    composes: pagebutton from "./styles/shared.module.css";
+    margin-top: 30px;
+    font-weight: 200;
 }
 
-.dot {
-  composes: pulseDot from "./styles/shared.module.css";
-}

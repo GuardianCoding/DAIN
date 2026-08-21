@@ -38,3 +38,12 @@
   border-radius: 10px;
   padding: 20px;
 }
+
+.pagebutton {
+  background: linear-gradient(135deg, var(--ink-1) 0%, var(--aqua) 55%, var(--blue) 100%);
+  width: 160px;
+  height: 50px;
+  font-size: 25;
+  text-decoration: none;
+  color: white;
+}
