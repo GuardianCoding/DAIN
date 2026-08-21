@@ -36,3 +36,14 @@ class Job:
     result: Optional[dict] = None
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+
+
+@dataclass
+class NodeMetrics:
+    node_id: str
+    timestamp: float
+    cpu_percent: float
+    ram_free_mb: int
+    gpu_percent: float | None
+    vram_free_mb: int | None
+    jobs_running: int = 0
