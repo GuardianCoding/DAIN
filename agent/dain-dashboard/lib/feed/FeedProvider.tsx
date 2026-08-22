@@ -74,7 +74,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
 
   async function refreshJob(id: string) {
     try {
-      const res = await fetch(`${API_BASE}/api/jobs/${id}`);
+      const res = await fetch(`${API_BASE}/jobs/${id}`);
       if (res.ok) {
         upsertJob(id, await res.json());
       } else {
