@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 
 import httpx
@@ -11,6 +12,8 @@ from ctl import main as main_module
 from ctl.main import JOB_QUEUE, REGISTRY, TELEMETRY, app, seed_registry
 from ctl.mock import MOCK_POOL_SECRET, reset_mock_state
 from ctl.queue import QueueEvent
+from node.auth import sign_join_challenge
+from node.discovery import MDNS_DISABLED_ENV
 
 client: TestClient
 
@@ -47,6 +50,8 @@ def run_control_plane():
     asyncio.run(original_client.aclose())
     original_telemetry_client = TELEMETRY.client
     original_telemetry_owns_client = TELEMETRY.owns_client
+    original_mdns_disabled = os.environ.get(MDNS_DISABLED_ENV)
+    os.environ[MDNS_DISABLED_ENV] = "1"
 
     mock_node_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     JOB_QUEUE.client = mock_node_client
@@ -61,6 +66,11 @@ def run_control_plane():
     finally:
         TELEMETRY.client = original_telemetry_client
         TELEMETRY.owns_client = original_telemetry_owns_client
+
+        if original_mdns_disabled is None:
+            os.environ.pop(MDNS_DISABLED_ENV, None)
+        else:
+            os.environ[MDNS_DISABLED_ENV] = original_mdns_disabled
 
         asyncio.run(mock_node_client.aclose())
 
@@ -86,26 +96,45 @@ def reset_state():
     seed_registry()
 
 
-def joined_node_payload() -> dict:
+def joined_node_profile() -> dict:
     return {
-        "profile": {
-            "id": "guest-01",
-            "host": "192.168.50.14",
-            "cpu": "Mock guest CPU",
-            "cores": 8,
-            "ram_total_mb": 16384,
-            "ram_free_mb": 12288,
-            "gpu": None,
-            "vram_total_mb": 0,
-            "backend": "cpu",
-            "mem_bandwidth_gbs": 40.0,
-            "tg_tok_s": 8.0,
-            "pp_tok_s": 55.0,
-            "rtt_ms": 0.6,
-            "state": "joining",
-        },
-        "pool_secret": MOCK_POOL_SECRET,
+        "id": "guest-01",
+        "host": "192.168.50.14",
+        "cpu": "Mock guest CPU",
+        "cores": 8,
+        "ram_total_mb": 16384,
+        "ram_free_mb": 12288,
+        "gpu": None,
+        "vram_total_mb": 0,
+        "backend": "cpu",
+        "mem_bandwidth_gbs": 40.0,
+        "tg_tok_s": 8.0,
+        "pp_tok_s": 55.0,
+        "rtt_ms": 0.6,
+        "state": "joining",
     }
+
+
+def join_guest(pool_secret: str = MOCK_POOL_SECRET):
+    profile = joined_node_profile()
+    challenge_response = client.post(
+        "/api/nodes/join/challenge",
+        json={"node_id": profile["id"]},
+    )
+    assert challenge_response.status_code == 200
+    nonce = challenge_response.json()["nonce"]
+    return client.post(
+        "/api/nodes/join",
+        json={
+            "profile": profile,
+            "nonce": nonce,
+            "signature": sign_join_challenge(
+                pool_secret,
+                nonce=nonce,
+                profile=profile,
+            ),
+        },
+    )
 
 
 def test_health():
@@ -130,16 +159,13 @@ def test_mock_nodes():
 
 
 def test_join_rejects_wrong_secret():
-    payload = joined_node_payload()
-    payload["pool_secret"] = "wrong"
-
-    response = client.post("/api/nodes/join", json=payload)
+    response = join_guest("wrong")
 
     assert response.status_code == 403
 
 
 def test_join_and_delete_node():
-    join_response = client.post("/api/nodes/join", json=joined_node_payload())
+    join_response = join_guest()
 
     assert join_response.status_code == 201
     assert join_response.json()["id"] == "guest-01"
@@ -360,7 +386,8 @@ async def test_feed_waits_once_per_cycle(monkeypatch, queue_events):
 
 
 def test_heartbeat_updates_joined_node():
-    client.post("/api/nodes/join", json=joined_node_payload())
+    join_response = join_guest()
+    token = join_response.json()["access_token"]
 
     response = client.post(
         "/api/nodes/guest-01/heartbeat",
@@ -375,6 +402,7 @@ def test_heartbeat_updates_joined_node():
                 "jobs_running": 1,
             }
         },
+        headers={"Authorization": f"Bearer {token}"},
     )
 
     assert response.status_code == 200
@@ -391,17 +419,33 @@ def test_heartbeat_updates_joined_node():
 
 
 def test_heartbeat_rejects_unknown_node():
+    join_response = join_guest()
+    token = join_response.json()["access_token"]
+    assert REGISTRY.remove("guest-01")
+
     response = client.post(
-        "/api/nodes/missing/heartbeat",
+        "/api/nodes/guest-01/heartbeat",
         json={},
+        headers={"Authorization": f"Bearer {token}"},
     )
 
     assert response.status_code == 404
     assert response.json()["detail"] == "node not found"
 
 
+def test_heartbeat_requires_the_join_bearer_token():
+    response = client.post(
+        "/api/nodes/guest-01/heartbeat",
+        json={},
+    )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
 def test_heartbeat_rejects_mismatched_metrics():
-    client.post("/api/nodes/join", json=joined_node_payload())
+    join_response = join_guest()
+    token = join_response.json()["access_token"]
 
     response = client.post(
         "/api/nodes/guest-01/heartbeat",
@@ -416,6 +460,7 @@ def test_heartbeat_rejects_mismatched_metrics():
                 "jobs_running": 0,
             }
         },
+        headers={"Authorization": f"Bearer {token}"},
     )
 
     assert response.status_code == 422
@@ -431,10 +476,7 @@ def test_feed_broadcasts_topology_changes():
         initial = websocket.receive_json()
         assert initial["type"] == "topology"
 
-        response = client.post(
-            "/api/nodes/join",
-            json=joined_node_payload(),
-        )
+        response = join_guest()
         assert response.status_code == 201
 
         for _ in range(20):

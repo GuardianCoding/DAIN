@@ -2,17 +2,18 @@
 
 One file, one command:
 
-    DAIN_POOL_SECRET=... python -m node.dain_node --ctl 192.168.50.20:8000
+    DAIN_POOL_SECRET=... python -m node.dain_node
 
 It profiles the machine, registers with the control plane, heartbeats every
-two seconds, exposes /health /profile /metrics /index /search, and supervises
-the local rpc-server. Set DAIN_INDEX_ROOT to the directory this node is allowed
-to index; it defaults to /srv/dain/index.
+two seconds, exposes /health /profile /metrics /index /search /exec, and
+supervises the local rpc-server. Set DAIN_INDEX_ROOT to the directory this node
+is allowed to index; it defaults to /srv/dain/index.
 
 Two contracts from the control plane (ctl/main.py) are load-bearing here:
 
-    POST /api/nodes/join                  {"profile": ..., "pool_secret": ...} -> 201 | 403
-    POST /api/nodes/{node_id}/heartbeat   {"metrics": ... | null}              -> 200 | 404
+    POST /api/nodes/join/challenge        {"node_id": ...}                -> nonce
+    POST /api/nodes/join                  {profile, nonce, signature}       -> token
+    POST /api/nodes/{node_id}/heartbeat   Bearer token + {"metrics": ...}  -> 200
 
 Neither takes a bare profile, and join is not a heartbeat: the registry
 counts missed heartbeats and declares a node offline after three of them
@@ -46,8 +47,10 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from contracts import NodeMetrics, NodeProfile
-from node.auth import verify_job_request
-from node.index import IndexNotReadyError, LocalFileIndex
+from node.auth import sign_join_challenge, verify_job_request
+from node.discovery import advertise_node, discover_control_plane
+from node.index import EmbeddingUnavailableError, IndexNotReadyError, LocalFileIndex
+from node.sandbox import CommandSandbox, SandboxExecutionError, SandboxRejected
 
 LOG = logging.getLogger("dain.node")
 
@@ -84,6 +87,7 @@ DISCARD_PORT = 9  # UDP connect() to here fixes a route without sending a packet
 HTTP_CREATED = 201
 HTTP_FORBIDDEN = 403
 HTTP_NOT_FOUND = 404
+HTTP_UNAUTHORIZED = 401
 
 EXIT_OK = 0
 EXIT_MISCONFIGURED = 2
@@ -280,15 +284,23 @@ class NodeAgent:
     profile: NodeProfile
     ctl: str
     pool_secret: str
+    bearer_token: str | None = None
+    token_expires_at: float | None = None
+    node_port: int = DEFAULT_NODE_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_proc: subprocess.Popen[bytes] | None = None
     search_index: LocalFileIndex = field(
         default_factory=LocalFileIndex.from_environment
     )
+    sandbox: CommandSandbox = field(default_factory=CommandSandbox.from_environment)
 
     @property
     def join_url(self) -> str:
         return f"http://{self.ctl}/api/nodes/join"
+
+    @property
+    def challenge_url(self) -> str:
+        return f"{self.join_url}/challenge"
 
     @property
     def heartbeat_url(self) -> str:
@@ -314,8 +326,44 @@ def adopt_reported_state(agent: NodeAgent, body: Any) -> None:
 
 
 async def join_pool(client: httpx.AsyncClient, agent: NodeAgent) -> bool:
-    """Register with the control plane. True once it answers 201."""
-    payload = {"profile": asdict(agent.profile), "pool_secret": agent.pool_secret}
+    """Complete the nonce/HMAC join and retain the short-lived bearer token."""
+    agent.bearer_token = None
+    agent.token_expires_at = None
+
+    try:
+        challenge_response = await client.post(
+            agent.challenge_url,
+            json={"node_id": agent.profile.id},
+            timeout=HTTP_TIMEOUT_S,
+        )
+    except httpx.HTTPError as exc:
+        LOG.warning("join challenge from %s failed: %s", agent.ctl, exc)
+        return False
+
+    if challenge_response.status_code != 200:
+        LOG.warning(
+            "join challenge returned %s: %s",
+            challenge_response.status_code,
+            challenge_response.text[:200],
+        )
+        return False
+
+    challenge = decode_body(challenge_response)
+    nonce = challenge.get("nonce") if isinstance(challenge, dict) else None
+    if not isinstance(nonce, str) or not nonce:
+        LOG.warning("join challenge returned no nonce")
+        return False
+
+    profile = asdict(agent.profile)
+    payload = {
+        "profile": profile,
+        "nonce": nonce,
+        "signature": sign_join_challenge(
+            agent.pool_secret,
+            nonce=nonce,
+            profile=profile,
+        ),
+    }
 
     try:
         response = await client.post(
@@ -338,7 +386,16 @@ async def join_pool(client: httpx.AsyncClient, agent: NodeAgent) -> bool:
         LOG.warning("join returned %s: %s", response.status_code, response.text[:200])
         return False
 
-    adopt_reported_state(agent, decode_body(response))
+    body = decode_body(response)
+    access_token = body.get("access_token") if isinstance(body, dict) else None
+    expires_at = body.get("expires_at") if isinstance(body, dict) else None
+    if not isinstance(access_token, str) or not isinstance(expires_at, (int, float)):
+        LOG.warning("join returned no bearer token")
+        return False
+
+    agent.bearer_token = access_token
+    agent.token_expires_at = float(expires_at)
+    adopt_reported_state(agent, body)
     LOG.info("joined the pool as %s on %s", agent.profile.id, agent.profile.host)
     return True
 
@@ -349,17 +406,25 @@ async def send_heartbeat(client: httpx.AsyncClient, agent: NodeAgent) -> bool:
     A transport error returns True: the control plane counts the miss and this
     node keeps beating rather than re-registering over a flapping link.
     """
+    if agent.bearer_token is None:
+        return False
+
     payload = {"metrics": asdict(sample_metrics(agent.profile.id))}
 
     try:
         response = await client.post(
-            agent.heartbeat_url, json=payload, timeout=HTTP_TIMEOUT_S
+            agent.heartbeat_url,
+            json=payload,
+            headers={"Authorization": f"Bearer {agent.bearer_token}"},
+            timeout=HTTP_TIMEOUT_S,
         )
     except httpx.HTTPError as exc:
         LOG.warning("heartbeat to %s failed: %s", agent.ctl, exc)
         return True
 
-    if response.status_code == HTTP_NOT_FOUND:
+    if response.status_code in {HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND}:
+        agent.bearer_token = None
+        agent.token_expires_at = None
         LOG.info("control plane does not know %s; re-joining", agent.profile.id)
         return False
 
@@ -403,6 +468,14 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
     agent = current_agent(scope)
     agent.rpc_proc = start_rpc_server(agent.profile.host, agent.rpc_port)
     beat = asyncio.create_task(heartbeat_loop(agent))
+    advertisement = None
+
+    try:
+        advertisement = await asyncio.to_thread(
+            advertise_node, agent.profile, port=agent.node_port
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        LOG.warning("mDNS node advertisement unavailable: %s", exc)
 
     try:
         yield
@@ -412,6 +485,8 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
             await beat
         stop_rpc_server(agent.rpc_proc)
         agent.rpc_proc = None
+        if advertisement is not None:
+            await asyncio.to_thread(advertisement.close)
 
 
 app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
@@ -419,7 +494,7 @@ app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 class LocalJobRequest(BaseModel):
     job_id: str = Field(min_length=1)
-    kind: Literal["index", "search"]
+    kind: Literal["exec", "index", "search"]
     payload: dict[str, Any] = Field(default_factory=dict)
     shard_index: int = Field(ge=0)
     shard_count: int = Field(ge=1)
@@ -447,8 +522,10 @@ def configure(
     profile: NodeProfile,
     ctl: str,
     pool_secret: str,
+    node_port: int = DEFAULT_NODE_PORT,
     rpc_port: int = DEFAULT_RPC_PORT,
     search_index: LocalFileIndex | None = None,
+    sandbox: CommandSandbox | None = None,
 ) -> NodeAgent:
     """Install the agent state the routes and the lifespan read.
 
@@ -459,8 +536,10 @@ def configure(
         profile=profile,
         ctl=ctl,
         pool_secret=pool_secret,
+        node_port=node_port,
         rpc_port=rpc_port,
         search_index=search_index or LocalFileIndex.from_environment(),
+        sandbox=sandbox or CommandSandbox.from_environment(),
     )
     app.state.agent = agent
     return agent
@@ -509,7 +588,10 @@ async def refresh_index(request: LocalJobRequest) -> dict[str, Any]:
     if request.kind != "index":
         raise HTTPException(status_code=422, detail="kind must be index")
 
-    stats = await asyncio.to_thread(agent.search_index.refresh)
+    try:
+        stats = await asyncio.to_thread(agent.search_index.refresh)
+    except EmbeddingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "ok": True,
         "result": {
@@ -539,6 +621,8 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
         hits = await asyncio.to_thread(agent.search_index.search, query, limit)
     except IndexNotReadyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except EmbeddingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -547,6 +631,7 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
         "result": {
             "node_id": agent.profile.id,
             "query": query,
+            "embedding_model": agent.search_index.model_id,
             "shard_index": request.shard_index,
             "shard_count": request.shard_count,
             "hits": [
@@ -557,6 +642,48 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
                 }
                 for hit in hits
             ],
+        },
+    }
+
+
+@app.post("/exec")
+async def execute(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "exec":
+        raise HTTPException(status_code=422, detail="kind must be exec")
+
+    argv = request.payload.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+        raise HTTPException(
+            status_code=422, detail="payload.argv must be a list of strings"
+        )
+    cwd = request.payload.get("cwd", ".")
+    timeout_s = request.payload.get("timeout_s", 5.0)
+    output_cap_bytes = request.payload.get("output_cap_bytes", 64 * 1024)
+    if not isinstance(cwd, str):
+        raise HTTPException(status_code=422, detail="payload.cwd must be a string")
+
+    try:
+        result = await asyncio.to_thread(
+            agent.sandbox.execute,
+            argv,
+            cwd=cwd,
+            timeout_s=timeout_s,
+            output_cap_bytes=output_cap_bytes,
+            job_id=request.job_id,
+        )
+    except SandboxRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SandboxExecutionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "ok": result.ok,
+        "result": {
+            "node_id": agent.profile.id,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            **result.to_dict(),
         },
     }
 
@@ -585,10 +712,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="[node] %(levelname)s %(message)s")
     args = parse_args(argv)
 
-    if not args.ctl:
+    ctl = args.ctl
+    if not ctl:
+        LOG.info("no control plane configured; discovering %s", "_dain._tcp.local.")
+        ctl = discover_control_plane()
+
+    if not ctl:
         LOG.error(
-            "no control plane endpoint: pass --ctl host:port or set $%s "
-            "(NODE-2's mDNS discovery removes this argument)",
+            "no control plane discovered: pass --ctl host:port or set $%s",
             CTL_ENDPOINT_ENV,
         )
         return EXIT_MISCONFIGURED
@@ -600,10 +731,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Profile first: the join payload, /profile and the rpc-server bind address
     # all read it, and all three start with the server.
-    ctl_host = args.ctl.rsplit(":", 1)[0]
+    ctl_host = ctl.rsplit(":", 1)[0]
     fabric_ip = detect_fabric_ip(ctl_host)
     profile = build_local_profile(args.node_id or socket.gethostname(), fabric_ip)
-    configure(profile, ctl=args.ctl, pool_secret=pool_secret, rpc_port=args.rpc_port)
+    configure(
+        profile,
+        ctl=ctl,
+        pool_secret=pool_secret,
+        node_port=args.port,
+        rpc_port=args.rpc_port,
+    )
 
     LOG.info(
         "profiled %s: %s, %s cores, %s MiB RAM, fabric %s",

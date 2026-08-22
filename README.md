@@ -34,7 +34,8 @@ uv run pytest
 | Method | Path | behaviour |
 | --- | --- | --- |
 | `GET` | `/api/nodes` | Returns the current in-memory node registry. |
-| `POST` | `/api/nodes/join` | Adds or replaces a node; returns `201` or `403`. |
+| `POST` | `/api/nodes/join/challenge` | Issues a one-use, 30-second join nonce. |
+| `POST` | `/api/nodes/join` | Verifies the nonce HMAC, registers the node and returns a short-lived bearer token. |
 | `DELETE` | `/api/nodes/{id}` | Removes a node; returns `204` or `404`. |
 | `GET` | `/api/plan?model=...` | Returns a deterministic mock `Assignment`. |
 | `POST` | `/api/jobs` | Creates a queued job and mock fan-out assignment. |
@@ -54,6 +55,26 @@ DAIN_POOL_SECRET=local-development-only \
 
 This is a development mock, not production authentication. Never place a real
 pool secret in the repository.
+
+## Install a Linux node
+
+On a Debian or Ubuntu node, export the same pool secret used by the controller
+and run the installer. It installs Python 3.12, locked project dependencies,
+bubblewrap isolation and a restarting `dain-node` systemd service. Re-running
+the command safely updates the existing installation.
+
+```bash
+export DAIN_POOL_SECRET='replace-with-the-pool-secret'
+curl -fsSL \
+  https://raw.githubusercontent.com/GuardianCoding/DAIN/main/scripts/install_node.sh \
+  | sudo --preserve-env=DAIN_POOL_SECRET bash
+```
+
+The node discovers the control plane over mDNS. Set `DAIN_CTL=host:8000` only
+when multicast discovery is unavailable. Static addressing and host-firewall
+changes are deliberately opt-in; see the variables documented at the top of
+`scripts/install_node.sh`. The secret is stored in `/etc/dain/node.env` with
+mode `0600`, not in the service unit or repository.
 
 ## Distributed file search
 
@@ -77,8 +98,13 @@ tampered requests before touching the filesystem. The pool secret is read from
 `DAIN_POOL_SECRET` and is never sent in a node-job request.
 
 Index refreshes are single-flight and bounded to 10,000 files, 256 MiB total,
-and 1 MiB per file. Search scores are corpus-independent so the controller can
-merge them across nodes. Each merged hit includes a unique `node_id:path`
+and 1 MiB per file. Search uses the 67 MB local
+`BAAI/bge-small-en-v1.5` model through FastEmbed; the installer downloads it
+once into `/var/cache/dain/fastembed`, then reloads it with network access
+disabled before starting the service. Runtime downloads are disabled, so a
+missing cache fails installation rather than the first demo search. All nodes
+report the model identifier, and cosine scores are corpus-independent and
+comparable across nodes. Each merged hit includes a unique `node_id:path`
 source, and `nodes_searched` identifies every machine that contributed.
 
 ## WebSocket frames

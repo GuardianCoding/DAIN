@@ -227,11 +227,17 @@ class JobQueue:
         with self.lock:
             job.result = {"shards": results, "errors": errors}
             if job.kind == "search":
-                job.result.update(self._merge_search_results(job, results))
+                try:
+                    job.result.update(self._merge_search_results(job, results))
+                except ShardExecutionError as exc:
+                    errors.append({"shard_index": None, "error": str(exc)})
             job.finished_at = time.time()
             job.status = "failed" if errors else "done"
             event = "failed" if errors else "completed"
-            self._emit(event, job, None, f"Job {job.id} {job.status}")
+            message = f"Job {job.id} {job.status}"
+            if errors:
+                message = f"{message}: {errors[0]['error']}"
+            self._emit(event, job, None, message)
 
     async def _run_shard(
         self,
@@ -368,6 +374,7 @@ class JobQueue:
     ) -> dict[str, Any]:
         merged_hits: list[dict[str, Any]] = []
         nodes_searched: set[str] = set()
+        embedding_models: set[str] = set()
 
         for shard in results:
             node_id = shard["node_id"]
@@ -375,6 +382,9 @@ class JobQueue:
             result = shard.get("result")
             if not isinstance(result, dict):
                 continue
+            model_id = result.get("embedding_model")
+            if isinstance(model_id, str) and model_id:
+                embedding_models.add(model_id)
 
             hits = result.get("hits", [])
             if not isinstance(hits, list):
@@ -412,10 +422,19 @@ class JobQueue:
             and requested_limit > 0
             else 5
         )
-        return {
+        if len(embedding_models) > 1:
+            raise ShardExecutionError(
+                "search nodes returned different embedding models: "
+                + ", ".join(sorted(embedding_models))
+            )
+
+        merged = {
             "hits": merged_hits[:limit],
             "nodes_searched": sorted(nodes_searched),
         }
+        if embedding_models:
+            merged["embedding_model"] = next(iter(embedding_models))
+        return merged
 
     def _ranked_nodes(self, exclude: set[str] | None = None) -> list[str]:
         excluded = exclude or set()

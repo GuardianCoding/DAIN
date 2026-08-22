@@ -52,6 +52,17 @@ models  = "/srv/dain/models"
 llama   = "/opt/dain/llama.cpp/build/bin"
 scratch = "/var/tmp/dain"
 
+[search]
+# NODE-5 uses a small ONNX embedding model on every node, separate from the
+# GGUF inference ladder below. scripts/install_node.sh downloads it while an
+# uplink exists, verifies that it reloads with HF_HUB_OFFLINE=1, then starts
+# the node with runtime downloads disabled.
+embedding_model     = "BAAI/bge-small-en-v1.5"
+embedding_cache     = "/var/cache/dain/fastembed"
+embedding_model_env = "DAIN_EMBED_MODEL"
+embedding_cache_env = "DAIN_EMBED_CACHE"
+runtime_offline     = true
+
 [llama]
 # INF-1. The invariant that prevents the silent RPC handshake hang is the
 # COMMIT — llama.cpp's RPC wire protocol has no version negotiation, so two
