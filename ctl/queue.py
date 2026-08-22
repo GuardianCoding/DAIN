@@ -42,6 +42,10 @@ TIMEOUT_MARGIN_S = 60.0
 # timeouts already produce readable 503s ("llama-server exited with code ...")
 # and those should win; this is only the backstop for a node that has stopped
 # answering entirely.
+#
+# Every kind has an entry so the table is the single complete answer to "how
+# long may this kind take?" — agent/client.py derives its own polling deadline
+# from it, and a missing key there would silently mean "give up immediately".
 DEFAULT_TIMEOUTS_S: dict[JobKind, float] = {
     # await_ready() polls for model load, then the generation itself.
     "infer": INFER_READY_TIMEOUT_S + INFER_REQUEST_TIMEOUT_S + TIMEOUT_MARGIN_S,
@@ -49,6 +53,10 @@ DEFAULT_TIMEOUTS_S: dict[JobKind, float] = {
     "bench": BENCH_TIMEOUT_S + TIMEOUT_MARGIN_S,
     # The sandbox refuses a per-command timeout above its own maximum.
     "exec": SANDBOX_MAX_TIMEOUT_S + TIMEOUT_MARGIN_S,
+    # Walking a disk and embedding every file. Overridden by index_timeout_s.
+    "index": 30.0,
+    # One query embedding against an index already in memory.
+    "search": 30.0,
 }
 
 
