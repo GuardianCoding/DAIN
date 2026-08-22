@@ -55,6 +55,26 @@ DAIN_POOL_SECRET=local-development-only \
 This is a development mock, not production authentication. Never place a real
 pool secret in the repository.
 
+## Install a Linux node
+
+On a Debian or Ubuntu node, export the same pool secret used by the controller
+and run the installer. It installs Python 3.12, locked project dependencies,
+bubblewrap isolation and a restarting `dain-node` systemd service. Re-running
+the command safely updates the existing installation.
+
+```bash
+export DAIN_POOL_SECRET='replace-with-the-pool-secret'
+curl -fsSL \
+  https://raw.githubusercontent.com/GuardianCoding/DAIN/main/scripts/install_node.sh \
+  | sudo --preserve-env=DAIN_POOL_SECRET bash
+```
+
+The node discovers the control plane over mDNS. Set `DAIN_CTL=host:8000` only
+when multicast discovery is unavailable. Static addressing and host-firewall
+changes are deliberately opt-in; see the variables documented at the top of
+`scripts/install_node.sh`. The secret is stored in `/etc/dain/node.env` with
+mode `0600`, not in the service unit or repository.
+
 ## Distributed file search
 
 Each node indexes only the directory configured by `DAIN_INDEX_ROOT`. Run an
