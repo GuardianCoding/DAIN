@@ -17,6 +17,7 @@ model_spec shape assumed here — CONFIRM WITH YOUSSEF, this is his territory
 from contracts import Assignment, NodeMetrics, NodeProfile
 
 UNIFIED_MEMORY_BACKENDS = {"metal"}
+COMPUTE_OVERHEAD_MB = 1600
 
 
 def usable_mem_mb(profile: NodeProfile, metric: NodeMetrics) -> float:
@@ -24,8 +25,10 @@ def usable_mem_mb(profile: NodeProfile, metric: NodeMetrics) -> float:
     Metal (unified memory) never adds vram_free_mb to ram_free_mb —
     they're the same physical pool. See mac-01 in the mock."""
     if profile.backend in UNIFIED_MEMORY_BACKENDS:
-        return metric.ram_free_mb
-    return metric.ram_free_mb + (metric.vram_free_mb or 0)
+        base = metric.ram_free_mb
+    else:
+        base = metric.ram_free_mb + (metric.vram_free_mb or 0)
+    return max(0.0, base - COMPUTE_OVERHEAD_MB)
 
 
 def layer_weight_mb(model_spec: dict) -> float:
