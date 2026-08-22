@@ -308,9 +308,7 @@ def _required_metric(
     try:
         return _metric_value(metrics, name, *aliases)
     except KeyError as exc:
-        raise ValueError(
-            f"node metrics response is missing {name}"
-        ) from exc
+        raise ValueError(f"node metrics response is missing {name}") from exc
 
 
 def _optional_metric(

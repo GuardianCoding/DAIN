@@ -309,6 +309,7 @@ async def test_empty_llama_metrics_are_reported() -> None:
         error = telemetry.frame()["errors"]["llama-server"]
         assert "no Prometheus metrics" in error
 
+
 @pytest.mark.asyncio
 async def test_poll_once_accepts_real_node_agent_metrics() -> None:
     async def handler(
@@ -323,9 +324,7 @@ async def test_poll_once_accepts_real_node_agent_metrics() -> None:
             ),
         )
 
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    ) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         telemetry = TelemetryFanIn(
             live_registry(),
             client=client,
