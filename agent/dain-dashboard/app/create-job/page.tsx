@@ -1,27 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import styles from "./page.module.css";
+import { getNodes, createJob } from "../components/API/api";
 import {
-  Terminal,
-  FileSearch,
-  Search,
-  Gauge,
-  MessageSquare,
-  Layers,
-  Send,
+  Terminal, FileSearch, Search, Gauge, MessageSquare, Layers, Send, CheckCircle2,
 } from "lucide-react";
 
-// Mirrors contracts.py Job dataclass.
-// POST /api/jobs { kind, payload, fanout, node_id }
 type JobKind = "infer" | "exec" | "index" | "search" | "bench";
 
-const KIND_OPTIONS: {
-  id: JobKind;
-  label: string;
-  hint: string;
-  icon: typeof MessageSquare;
-}[] = [
+const KIND_OPTIONS: { id: JobKind; label: string; hint: string; icon: typeof MessageSquare }[] = [
   { id: "infer", label: "Infer", hint: "Run a prompt against the model", icon: MessageSquare },
   { id: "exec", label: "Exec", hint: "Sandboxed command on a node", icon: Terminal },
   { id: "index", label: "Index", hint: "Embed local files on a node", icon: FileSearch },
@@ -29,15 +18,24 @@ const KIND_OPTIONS: {
   { id: "bench", label: "Bench", hint: "Run llama-bench, record numbers", icon: Gauge },
 ];
 
-const FANOUT_OPTIONS = [1, 2, 3, 4];
-
-// Fake nodes for node targeting — replace with Abdallah's /api/nodes
-const AVAILABLE_NODES = ["auto", "gpu-01", "office-01", "office-02", "nuc-01"];
-
-type SubmitState = "idle" | "queued" | "error";
+const FANOUT_OPTIONS = [1, 2, 3, 4, 5];
+type SubmitState = "idle" | "queued" | "success" | "error";
 
 export default function CreateJob() {
-  const [kind, setKind] = useState<JobKind>("infer");
+  const [nodes, setNodes] = useState<[]>([]);
+  const [nodesError, setNodesError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getNodes()
+      .then((res) => { if (!cancelled) setNodes(res); })
+      .catch((err) => { if (!cancelled) setNodesError(String(err)); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const nodeNames = nodes.map((n) => n.id);
+
+  const [kind, setKind] = useState("infer");
   const [prompt, setPrompt] = useState("");
   const [fanout, setFanout] = useState(1);
   const [nodeId, setNodeId] = useState("auto");
@@ -52,17 +50,17 @@ export default function CreateJob() {
     if (!prompt.trim() || overCap) return;
 
     setState("queued");
+
     try {
-      // await fetch("/api/jobs", {
-      //   method: "POST",
-      //   headers: { "Content-Type": "application/json" },
-      //   body: JSON.stringify({
-      //     kind,
-      //     payload: { prompt },
-      //     fanout: canFanout ? fanout : 1,
-      //     node_id: nodeId === "auto" ? null : nodeId,
-      //   }),
-      // });
+      await createJob(
+        kind,
+        { prompt },
+        fanout,
+        nodeId === "auto" ? null : nodeId
+      );
+
+      setState("success");
+      setPrompt("");
     } catch {
       setState("error");
     }
@@ -75,15 +73,28 @@ export default function CreateJob() {
           <p className={styles.kicker}>D.A.I.N</p>
           <h1 className={styles.title}>Create Job</h1>
         </div>
-
         <span className={styles.badge}>
           <Layers size={13} />
           {canFanout ? `fanout ×${fanout}` : "single node"}
         </span>
       </header>
 
+      {state === "success" && (
+        <div className={styles.successBanner} role="status">
+          <CheckCircle2 size={16} />
+          <span>
+            Job queued. Track its progress on the jobs page.
+          </span>
+        </div>
+      )}
+
+      {state === "error" && (
+        <div className={styles.errorBanner} role="alert">
+          Couldn&apos;t queue the job. Check the control plane and try again.
+        </div>
+      )}
+
       <form className={styles.card} onSubmit={handleSubmit}>
-        {/* Job kind */}
         <div className={styles.field}>
           <span className={styles.fieldLabel}>Kind</span>
           <div className={styles.kindGrid}>
@@ -103,7 +114,6 @@ export default function CreateJob() {
           </div>
         </div>
 
-        {/* Prompt / payload */}
         <div className={styles.field}>
           <div className={styles.fieldRow}>
             <span className={styles.fieldLabel}>Prompt</span>
@@ -120,7 +130,6 @@ export default function CreateJob() {
           />
         </div>
 
-        {/* Fanout */}
         {canFanout && (
           <div className={styles.field}>
             <span className={styles.fieldLabel}>Fanout</span>
@@ -140,12 +149,19 @@ export default function CreateJob() {
           </div>
         )}
 
-        {/* Target node — only meaningful outside fanout */}
         {!canFanout && (
           <div className={styles.field}>
             <span className={styles.fieldLabel}>Node</span>
             <div className={styles.pillRow}>
-              {AVAILABLE_NODES.map((n) => (
+              <button
+                type="button"
+                className={styles.pillOption}
+                data-active={nodeId === "auto"}
+                onClick={() => setNodeId("auto")}
+              >
+                auto
+              </button>
+              {nodeNames.map((n) => (
                 <button
                   type="button"
                   key={n}
@@ -157,18 +173,18 @@ export default function CreateJob() {
                 </button>
               ))}
             </div>
+            {nodesError && <span className={styles.countWarn}>nodes unavailable: {nodesError}</span>}
           </div>
         )}
 
         <div className={styles.footer}>
-
           <button
             type="submit"
             className={styles.submit}
-            disabled={!prompt.trim() || overCap}
+            disabled={!prompt.trim() || overCap || state === "queued"}
           >
             <Send size={15} />
-            Run job
+            {state === "queued" ? "Running…" : "Run job"}
           </button>
         </div>
       </form>
