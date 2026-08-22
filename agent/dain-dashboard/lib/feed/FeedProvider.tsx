@@ -55,8 +55,14 @@ export function FeedProvider({ children }: { children: ReactNode }) {
   const [nodes, setNodes] = useState<Map<string, NodeInfo>>(new Map());
   const [metrics, setMetrics] = useState<Map<string, NodeMetrics>>(new Map());
   const [jobs, setJobs] = useState<Map<string, Job>>(new Map());
+  // Mirror of `jobs` readable from the socket callbacks, which are created once
+  // and would otherwise close over the first render's Map forever. Written in
+  // an effect, not during render: mutating a ref while rendering is what
+  // react-hooks/refs flags, and it misbehaves under concurrent rendering.
   const jobsRef = useRef(jobs);
-  jobsRef.current = jobs;
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   const wsRef = useRef<WebSocket | null>(null);
   // Explicit `undefined` argument: React 19's types reject the zero-arg
@@ -109,7 +115,10 @@ export function FeedProvider({ children }: { children: ReactNode }) {
     }
 
     if (frame.type === "event" && frame.source === "registry") {
-      const id = (frame as any).node_id ?? (frame as any).id;
+      // Registry events name the node as `node_id`; a few older frames used
+      // `id`. Both arrive through the frame's index signature as `unknown`.
+      const raw = frame.node_id ?? frame.id;
+      const id = typeof raw === "string" ? raw : undefined;
       if (!id) return;
       setNodes((prev) => {
         const next = new Map(prev);
@@ -226,6 +235,12 @@ export function FeedProvider({ children }: { children: ReactNode }) {
         wsRef.current.close();
       }
     };
+    // Deliberately empty: this effect owns the single long-lived socket for
+    // the whole app. Including handleFrame/refreshJob would tear the socket
+    // down and reconnect on every render, which is the exact bug the
+    // one-provider design exists to prevent. Both close over setState updater
+    // functions and module-level constants only, so neither goes stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function seedJob(job: Job) {

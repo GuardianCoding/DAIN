@@ -1,4 +1,5 @@
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
@@ -80,7 +81,25 @@ def seed_registry() -> None:
     TELEMETRY.reset(REGISTRY.latest_metrics())
 
 
-seed_registry()
+MOCK_NODE_ENV = "DAIN_MOCK_NODES"
+
+
+def _mock_nodes_requested() -> bool:
+    return os.getenv(MOCK_NODE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Mock nodes are OFF by default. They used to be seeded unconditionally at
+# import, so a live control plane always advertised gpu-01, office-01,
+# office-02 and mac-01 whether or not those machines existed. On the fabric
+# that is worse than useless: the dashboard shows four idle nodes, nothing is
+# listening on :9100 for any of them, and a real node that joins is buried
+# among the fakes. They register with heartbeat_required=False, so the offline
+# sweep never retires them either — they sit there looking healthy forever.
+#
+# Set DAIN_MOCK_NODES=1 for a UI demo with no hardware. tests/test_main.py
+# calls seed_registry() directly in its fixtures and is unaffected.
+if _mock_nodes_requested():
+    seed_registry()
 
 
 async def monitor_heartbeats() -> None:
