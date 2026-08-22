@@ -100,10 +100,12 @@ tampered requests before touching the filesystem. The pool secret is read from
 Index refreshes are single-flight and bounded to 10,000 files, 256 MiB total,
 and 1 MiB per file. Search uses the 67 MB local
 `BAAI/bge-small-en-v1.5` model through FastEmbed; the installer downloads it
-once into `/var/cache/dain/fastembed`. All nodes report the model identifier,
-and cosine scores are corpus-independent and comparable across nodes. Each
-merged hit includes a unique `node_id:path` source, and `nodes_searched`
-identifies every machine that contributed.
+once into `/var/cache/dain/fastembed`, then reloads it with network access
+disabled before starting the service. Runtime downloads are disabled, so a
+missing cache fails installation rather than the first demo search. All nodes
+report the model identifier, and cosine scores are corpus-independent and
+comparable across nodes. Each merged hit includes a unique `node_id:path`
+source, and `nodes_searched` identifies every machine that contributed.
 
 ## WebSocket frames
 

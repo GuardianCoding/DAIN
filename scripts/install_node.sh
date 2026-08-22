@@ -172,6 +172,7 @@ write_environment_file() {
     printf 'DAIN_INDEX_ROOT=%s\n' "$(environment_value "$INDEX_ROOT")"
     printf 'DAIN_EMBED_CACHE=%s\n' "$(environment_value "$EMBED_CACHE")"
     printf 'DAIN_EMBED_MODEL=%s\n' "$(environment_value "$EMBED_MODEL")"
+    printf 'HF_HUB_OFFLINE="1"\n'
     if [[ -n "${DAIN_CTL:-}" ]]; then
       printf 'DAIN_CTL=%s\n' "$(environment_value "$DAIN_CTL")"
     fi
@@ -186,8 +187,16 @@ prewarm_embedding_model() {
   log "Caching local embedding model ${EMBED_MODEL}"
   run runuser -u "$DAIN_USER" -- env \
     PYTHONPATH="$APP_DIR" DAIN_EMBED_CACHE="$EMBED_CACHE" DAIN_EMBED_MODEL="$EMBED_MODEL" \
+    DAIN_EMBED_ALLOW_DOWNLOAD=1 \
     "${APP_DIR}/.venv/bin/python" -c \
     'from node.index import LocalEmbeddingModel; LocalEmbeddingModel.from_environment().prewarm()'
+
+  log "Verifying embedding model with network access disabled"
+  run runuser -u "$DAIN_USER" -- env \
+    PYTHONPATH="$APP_DIR" DAIN_EMBED_CACHE="$EMBED_CACHE" DAIN_EMBED_MODEL="$EMBED_MODEL" \
+    HF_HUB_OFFLINE=1 \
+    "${APP_DIR}/.venv/bin/python" -c \
+    'from node.index import LocalEmbeddingModel; assert LocalEmbeddingModel.from_environment().embed_query("offline readiness")'
 }
 
 write_systemd_unit() {

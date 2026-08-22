@@ -1,9 +1,9 @@
 """Restricted local command execution for DAIN NODE-4.
 
-The node never invokes a shell.  Linux nodes additionally execute through
-bubblewrap with a private network namespace and only the scratch directory
-writable.  A deliberately small command allowlist keeps the non-Linux
-development fallback useful without pretending it is a general-purpose jail.
+The node never invokes a shell. Commands execute through bubblewrap with a
+private network namespace and only the scratch directory writable. Missing
+OS isolation fails closed; the non-isolated mode must be enabled explicitly
+and exists only for unit tests.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import os
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePath
@@ -59,6 +58,8 @@ FORBIDDEN_OPTIONS = frozenset(
     }
 )
 FORBIDDEN_OPTION_PREFIXES = ("--output=", "--pre=", "--pre-glob=")
+FORBIDDEN_SHORT_FLAGS = frozenset({"L", "R"})
+FORBIDDEN_SHORT_FLAGS_BY_COMMAND = {"sort": frozenset({"o"})}
 
 
 class SandboxRejected(ValueError):
@@ -104,9 +105,7 @@ class CommandSandbox:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.allowlist = allowlist
         self.require_linux_isolation = (
-            sys.platform.startswith("linux")
-            if require_linux_isolation is None
-            else require_linux_isolation
+            True if require_linux_isolation is None else require_linux_isolation
         )
         self.bubblewrap = (
             None
@@ -240,10 +239,7 @@ class CommandSandbox:
         command_name = Path(argv[0]).name
         if argv[0] != command_name or command_name not in self.allowlist:
             raise SandboxRejected(f"command {argv[0]!r} is not allowlisted")
-        if any(
-            value in FORBIDDEN_OPTIONS or value.startswith(FORBIDDEN_OPTION_PREFIXES)
-            for value in argv[1:]
-        ):
+        if any(self._forbidden_option(command_name, value) for value in argv[1:]):
             raise SandboxRejected("command requests forbidden link or helper traversal")
         if not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool):
             raise SandboxRejected("timeout_s must be a number")
@@ -271,6 +267,19 @@ class CommandSandbox:
         if self.require_linux_isolation and self.bubblewrap is None:
             raise SandboxRejected("bubblewrap is required for isolated execution")
         return executable, working_directory
+
+    @staticmethod
+    def _forbidden_option(command_name: str, value: str) -> bool:
+        if value in FORBIDDEN_OPTIONS or value.startswith(FORBIDDEN_OPTION_PREFIXES):
+            return True
+        if not value.startswith("-") or value.startswith("--"):
+            return False
+
+        bundled_flags = value[1:]
+        forbidden = FORBIDDEN_SHORT_FLAGS | FORBIDDEN_SHORT_FLAGS_BY_COMMAND.get(
+            command_name, frozenset()
+        )
+        return any(flag in bundled_flags for flag in forbidden)
 
     def _jailed_path(self, value: str) -> Path:
         if not isinstance(value, str) or not value or value.startswith("~"):

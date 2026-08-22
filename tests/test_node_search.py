@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import ClassVar
 
+import fastembed
 import pytest
 from fastapi.testclient import TestClient
 
@@ -382,3 +383,33 @@ def test_fastembed_adapter_uses_passage_and_query_modes() -> None:
         ("passages", ["first", "second"]),
         ("query", "question"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("allow_download", "local_files_only"),
+    [(None, True), ("1", False)],
+)
+def test_embedding_downloads_are_opt_in(
+    monkeypatch,
+    allow_download: str | None,
+    local_files_only: bool,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Backend:
+        pass
+
+    def fake_text_embedding(**kwargs):
+        captured.update(kwargs)
+        return Backend()
+
+    if allow_download is None:
+        monkeypatch.delenv("DAIN_EMBED_ALLOW_DOWNLOAD", raising=False)
+    else:
+        monkeypatch.setenv("DAIN_EMBED_ALLOW_DOWNLOAD", allow_download)
+    monkeypatch.setattr(fastembed, "TextEmbedding", fake_text_embedding)
+
+    model = LocalEmbeddingModel("test/local-model", cache_dir="/tmp/test-cache")
+    model.prewarm()
+
+    assert captured["local_files_only"] is local_files_only

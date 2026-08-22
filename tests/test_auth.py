@@ -56,7 +56,7 @@ def test_valid_challenge_issues_a_short_lived_token() -> None:
     assert manager.validate_token("office-01", token.access_token)
 
 
-def test_join_challenge_is_one_use_even_after_a_bad_signature() -> None:
+def test_bad_signature_does_not_consume_the_legitimate_challenge() -> None:
     clock = FakeClock()
     manager = make_manager(clock)
     profile = asdict(make_profile())
@@ -70,8 +70,35 @@ def test_join_challenge_is_one_use_even_after_a_bad_signature() -> None:
         nonce=challenge.nonce,
         profile=profile,
     )
+    token = manager.complete_join(profile, challenge.nonce, correct_signature)
+
+    assert manager.validate_token(profile["id"], token.access_token)
     with pytest.raises(AuthenticationError, match="already-used"):
         manager.complete_join(profile, challenge.nonce, correct_signature)
+
+
+def test_second_challenge_does_not_overwrite_a_pending_challenge() -> None:
+    clock = FakeClock()
+    manager = make_manager(clock)
+    profile = asdict(make_profile())
+    legitimate = manager.issue_challenge(profile["id"])
+    attacker = manager.issue_challenge(profile["id"])
+
+    with pytest.raises(AuthenticationError, match="signature"):
+        manager.complete_join(profile, attacker.nonce, "0" * 64)
+
+    legitimate_signature = sign_join_challenge(
+        POOL_SECRET,
+        nonce=legitimate.nonce,
+        profile=profile,
+    )
+    token = manager.complete_join(
+        profile,
+        legitimate.nonce,
+        legitimate_signature,
+    )
+
+    assert manager.validate_token(profile["id"], token.access_token)
 
 
 def test_expired_challenge_is_rejected() -> None:

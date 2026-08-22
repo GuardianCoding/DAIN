@@ -61,12 +61,14 @@ class JoinAuthManager:
             raise ValueError("node_id must not be empty")
 
         with self.lock:
+            now = self.clock()
+            self._prune_expired_challenges(now)
             challenge = JoinChallenge(
                 node_id=node_id,
                 nonce=self.token_factory(32),
-                expires_at=self.clock() + self.challenge_ttl_s,
+                expires_at=now + self.challenge_ttl_s,
             )
-            self.challenges[node_id] = challenge
+            self.challenges[challenge.nonce] = challenge
             return challenge
 
     def complete_join(
@@ -80,12 +82,13 @@ class JoinAuthManager:
             raise AuthenticationError("profile has no node id")
 
         with self.lock:
-            challenge = self.challenges.pop(node_id, None)
             now = self.clock()
+            challenge = self.challenges.get(nonce)
 
-            if challenge is None or challenge.nonce != nonce:
+            if challenge is None or challenge.node_id != node_id:
                 raise AuthenticationError("invalid or already-used join challenge")
             if now > challenge.expires_at:
+                self.challenges.pop(nonce, None)
                 raise AuthenticationError("join challenge expired")
             if not verify_join_challenge(
                 self.pool_secret,
@@ -95,6 +98,7 @@ class JoinAuthManager:
             ):
                 raise AuthenticationError("invalid join signature")
 
+            self.challenges.pop(nonce, None)
             token = NodeToken(
                 node_id=node_id,
                 access_token=self.token_factory(32),
@@ -115,10 +119,21 @@ class JoinAuthManager:
 
     def revoke(self, node_id: str) -> None:
         with self.lock:
-            self.challenges.pop(node_id, None)
+            self.challenges = {
+                nonce: challenge
+                for nonce, challenge in self.challenges.items()
+                if challenge.node_id != node_id
+            }
             self.tokens.pop(node_id, None)
 
     def reset(self) -> None:
         with self.lock:
             self.challenges.clear()
             self.tokens.clear()
+
+    def _prune_expired_challenges(self, now: float) -> None:
+        self.challenges = {
+            nonce: challenge
+            for nonce, challenge in self.challenges.items()
+            if challenge.expires_at >= now
+        }

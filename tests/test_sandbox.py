@@ -16,7 +16,7 @@ from tests.node_doubles import CTL, NODE_ID, POOL_SECRET, make_profile
 def sandbox(root: Path, *, allowlist: frozenset[str] | None = None) -> CommandSandbox:
     return CommandSandbox(
         root,
-        allowlist=allowlist or frozenset({"cat", "ls", "sort", "tail"}),
+        allowlist=allowlist or frozenset({"cat", "grep", "ls", "sort", "tail"}),
         require_linux_isolation=False,
         bubblewrap=False,
     )
@@ -72,6 +72,8 @@ def test_executes_allowlisted_command_inside_scratch(tmp_path):
         ["cat", "../outside.txt"],
         ["sh", "-c", "cat note.txt"],
         ["sort", "--output=exec-audit.jsonl"],
+        ["sort", "-oexec-audit.jsonl"],
+        ["grep", "-rR", "secret", "."],
     ],
 )
 def test_refuses_unsafe_commands_and_paths_and_logs_them(tmp_path, argv):
@@ -143,6 +145,17 @@ def test_linux_isolation_is_fail_closed_without_bubblewrap(tmp_path):
         instance.execute(["ls"])
 
     assert audit_entries(instance)[0]["status"] == "refused"
+
+
+def test_isolation_is_required_by_default_on_every_platform(tmp_path):
+    instance = CommandSandbox(
+        tmp_path,
+        allowlist=frozenset({"ls"}),
+        bubblewrap=False,
+    )
+
+    with pytest.raises(SandboxRejected, match="bubblewrap is required"):
+        instance.execute(["ls"])
 
 
 def test_isolation_runtime_failure_is_logged(tmp_path):

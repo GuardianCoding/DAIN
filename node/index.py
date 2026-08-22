@@ -20,6 +20,7 @@ from typing import Any, Protocol
 INDEX_ROOT_ENV = "DAIN_INDEX_ROOT"
 EMBED_MODEL_ENV = "DAIN_EMBED_MODEL"
 EMBED_CACHE_ENV = "DAIN_EMBED_CACHE"
+EMBED_ALLOW_DOWNLOAD_ENV = "DAIN_EMBED_ALLOW_DOWNLOAD"
 DEFAULT_INDEX_ROOT = "/srv/dain/index"
 DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_RESULT_LIMIT = 5
@@ -88,9 +89,15 @@ class LocalEmbeddingModel:
         model_id: str = DEFAULT_EMBED_MODEL,
         *,
         cache_dir: str | None = None,
+        local_files_only: bool | None = None,
     ) -> None:
         self.model_id = model_id
         self.cache_dir = cache_dir or os.getenv(EMBED_CACHE_ENV)
+        self.local_files_only = (
+            not _enabled(os.getenv(EMBED_ALLOW_DOWNLOAD_ENV))
+            if local_files_only is None
+            else local_files_only
+        )
         self._model: Any | None = None
         self._lock = RLock()
 
@@ -140,6 +147,7 @@ class LocalEmbeddingModel:
                     model_name=self.model_id,
                     cache_dir=self.cache_dir,
                     lazy_load=False,
+                    local_files_only=self.local_files_only,
                 )
             except Exception as exc:
                 raise EmbeddingUnavailableError(
@@ -366,3 +374,7 @@ def cosine_similarity(
     right: tuple[float, ...],
 ) -> float:
     return sum(a * b for a, b in zip(left, right, strict=True))
+
+
+def _enabled(value: str | None) -> bool:
+    return value is not None and value.strip().casefold() in {"1", "true", "yes", "on"}
