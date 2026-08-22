@@ -9,7 +9,7 @@ import {
   Activity,
 } from "lucide-react";
 
-const API_URL = "http://localhost:8001"; // the control server
+import { getNodes } from "../components/API/api";
 
 function formatMemory(mb: number) {
   if (mb >= 1024) {
@@ -23,8 +23,8 @@ function getRamUsage(node: any) {
 }
 
 export default async function Dashboard() {
-  const data = await fetch(`${API_URL}/api/nodes`);
-  const nodes = await data.json();
+  const nodes = await getNodes();
+  console.log(nodes);
 
   return (
     <main className={styles.stage}>
