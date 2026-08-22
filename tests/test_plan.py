@@ -1,7 +1,13 @@
-from sched.cost import fits
+from sched.cost import COMPUTE_OVERHEAD_MB, fits
 from sched.plan import plan
 
 from contracts import NodeMetrics, NodeProfile
+
+# Every memory figure below is written as "usable + COMPUTE_OVERHEAD_MB",
+# because usable_mem_mb() subtracts llama.cpp's per-node compute-buffer
+# allowance before any layer is placed. Stating the usable number and adding
+# the overhead back keeps the arithmetic in each test readable, and means
+# these fixtures stay correct if the constant is ever retuned.
 
 
 def make_profile(
@@ -15,8 +21,8 @@ def make_profile(
         host=f"{node_id}.local",
         cpu="test cpu",
         cores=4,
-        ram_total_mb=2_000,
-        ram_free_mb=2_000,
+        ram_total_mb=1_000 + COMPUTE_OVERHEAD_MB,
+        ram_free_mb=1_000 + COMPUTE_OVERHEAD_MB,
         gpu=None,
         vram_total_mb=0,
         backend="cpu",
@@ -50,8 +56,8 @@ def test_plan_excludes_offline_nodes() -> None:
         make_profile("offline-01", speed=100.0, state="offline"),
     ]
     metrics = [
-        make_metrics("idle-01", free_mb=1_000),
-        make_metrics("offline-01", free_mb=1_000),
+        make_metrics("idle-01", free_mb=1_000 + COMPUTE_OVERHEAD_MB),
+        make_metrics("offline-01", free_mb=1_000 + COMPUTE_OVERHEAD_MB),
     ]
     model = {
         "model_id": "test-model",
@@ -71,8 +77,9 @@ def test_repair_preserves_layers_and_updates_tensor_split() -> None:
         make_profile("b", speed=1.0),
     ]
     metrics = [
-        make_metrics("a", free_mb=300),
-        make_metrics("b", free_mb=1_000),
+        # 300 usable holds 3 of the 10 100-MiB layers; 1000 holds the other 7.
+        make_metrics("a", free_mb=300 + COMPUTE_OVERHEAD_MB),
+        make_metrics("b", free_mb=1_000 + COMPUTE_OVERHEAD_MB),
     ]
     model = {
         "model_id": "test-model",
@@ -97,9 +104,11 @@ def test_repair_counts_kv_memory_when_selecting_donor() -> None:
         make_profile("c", speed=1.0),
     ]
     metrics = [
-        make_metrics("a", free_mb=400),
-        make_metrics("b", free_mb=250),
-        make_metrics("c", free_mb=1_000),
+        # Each layer costs 100 MiB of weights + 100 MiB of KV, so 250 usable
+        # buys exactly one layer on b — the point the donor choice turns on.
+        make_metrics("a", free_mb=400 + COMPUTE_OVERHEAD_MB),
+        make_metrics("b", free_mb=250 + COMPUTE_OVERHEAD_MB),
+        make_metrics("c", free_mb=1_000 + COMPUTE_OVERHEAD_MB),
     ]
     model = {
         "model_id": "test-model",
