@@ -48,9 +48,9 @@ params_active_b = 4.0
 priority        = 2
 claim           = "Fan-out: one full copy per node, N independent subtasks at once."
 notes = """
-Sized against nuc-01's ~3.2 GiB usable under Linux. Under Windows 11 the NUC had
-~2.2 GiB and could NOT hold this — moving it to Linux is what puts the fifth
-node into the fan-out demo at all.
+Sized against nuc-01's ~3.2 GiB usable headless. A graphical session costs
+~1.7 GiB there and drops it below this line, which is why nuc-01 must stay
+headless — that margin is what puts the fifth node into the fan-out demo.
 Doubles as the 'fast and wrong' side of Liam's showdown (AG-2): ~4B is below the
 ~7B floor where tool calling starts working, which is precisely the point.
 """

@@ -9,9 +9,14 @@ gpu-01 holds ~77 GiB by itself, so weights alone almost never prove the claim.
 What does prove it is weights + KV cache + concurrency, which is what
 `capacity_report` computes.
 
-All memory values are MiB (binary), matching `free -m`, Task Manager and
+All memory values are MiB (binary), matching `free -m` and
 contracts.NodeProfile.ram_total_mb. Download sizes stay in decimal GB and live
 in infer/models.py. Never mix them.
+
+Every node is Linux, so `free -m` is the only reading that matters — including
+on gpu-02, where it reports the WSL2 VM's allocation rather than the host's
+16 GB. That is the correct number to plan against, because it is all the node
+can ever give a model.
 """
 
 from __future__ import annotations
@@ -31,8 +36,16 @@ CLUSTER_PATH = Path(__file__).resolve().parent.parent / "cluster.toml"
 OS_RESERVE_MIB: dict[str, int] = {
     "linux-headless": 800,
     "linux-desktop": 2500,
-    "windows-lean": 3500,
-    "windows-desktop": 4600,
+    # WSL2 (gpu-02). Small, because this is NOT the Windows host's reserve:
+    # inside WSL, /proc/meminfo reports the VM's allocation, so the host's cut
+    # has already been taken before this table is consulted. What is left to
+    # reserve is the VM's own minimal userland.
+    #
+    # The corollary is that this number is only correct if [wsl].memory_gb in
+    # cluster.toml matches what .wslconfig actually granted. WSL2 defaults to
+    # half of host RAM, so an unset .wslconfig makes gpu-02 silently smaller
+    # than the fixture claims. scripts/inventory.sh checks for exactly that.
+    "linux-wsl": 512,
 }
 
 # Driver + compositor working set that is never available to a model.

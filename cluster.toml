@@ -41,28 +41,71 @@ min_workers = 0
 # How long a draining node keeps serving before it is cut loose.
 drain_grace_s = 10
 
-# Paths differ by OS because this cluster is Linux everywhere except gpu-02.
+# Every node is Linux, so there is ONE set of paths. gpu-02 reaches these paths
+# through WSL2, where /srv and /opt are the WSL filesystem — never anything
+# under /mnt/c. A weights file on /mnt/c is read across the 9p bridge at a
+# fraction of native speed, and mmap of a GGUF there is worse than that.
+#
 # What must be IDENTICAL across nodes is the llama.cpp commit, not the path.
-[paths.linux]
+[paths]
 models  = "/srv/dain/models"
 llama   = "/opt/dain/llama.cpp/build/bin"
 scratch = "/var/tmp/dain"
 
-[paths.windows]
-models  = "C:/dain/models"
-llama   = "C:/dain/llama.cpp/build/bin/Release"
-scratch = "C:/dain/scratch"
-
 [llama]
-# INF-1, rewritten for a mixed-OS cluster. "Distribute one binary and checksum
-# it" is impossible here — a Linux ELF and a Windows PE can never match. The
-# invariant that prevents the silent RPC handshake hang is the COMMIT.
+# INF-1. The invariant that prevents the silent RPC handshake hang is the
+# COMMIT — llama.cpp's RPC wire protocol has no version negotiation, so two
+# nodes built from different commits connect happily and then hang or return
+# noise.
 #
-#   Acceptance test (replaces the checksum test):
+#   Acceptance test:
 #     every node reports this commit from `llama-server --version`.
-pinned_commit       = "UNVERIFIED"
-build_flags_linux   = "-DGGML_VULKAN=ON -DGGML_RPC=ON -DGGML_CUDA=ON"
-build_flags_windows = "-DGGML_VULKAN=ON -DGGML_RPC=ON"
+#
+# Now that all five nodes are Linux x86-64, the checksum test the brief wanted
+# IS possible on the worker binary: every machine built from build_flags_worker
+# should hold a byte-identical rpc-server. scripts/distribute_llama.sh checks
+# the commit on all five and the checksum on the four that share a build.
+pinned_commit = "UNVERIFIED"
+
+# TWO builds from ONE commit, not one build for five nodes.
+#
+# GGML_NATIVE defaults to ON and adds -march=native. gpu-01 is Zen 5 and has
+# AVX-512; office-01/02 are Skylake and nuc-01 is Kaby Lake, which have AVX2 and
+# no AVX-512. Build on gpu-01 with the default, copy the binary, and it dies
+# with SIGILL on the first tensor op — a crash that reads like a corrupt model
+# file and wastes an evening. GGML_NATIVE=OFF plus explicit ISA flags is what
+# makes one build copyable to four machines.
+#
+# BUILD_SHARED_LIBS=OFF on the worker build so distribution is a plain file copy
+# with no libggml-*.so to chase.
+build_flags_head   = "-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_RPC=ON -DGGML_NATIVE=ON"
+build_flags_worker = "-DGGML_RPC=ON -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DBUILD_SHARED_LIBS=OFF"
+
+[wsl]
+# gpu-02 only. Two host-side settings, both in %USERPROFILE%\.wslconfig on the
+# Windows side, neither of which this repo can apply for you. Get them wrong and
+# the failure looks like a firewall problem that no firewall change fixes.
+#
+# 1. networkingMode. WSL2 defaults to NAT: the VM gets a 172.x address behind a
+#    virtual switch that multicast does not cross. mDNS join therefore never
+#    happens and gpu-02 is invisible to discovery. Mirrored mode puts WSL
+#    directly on the host's LAN interface, and is the only mode this design
+#    works under.
+#
+# 2. memory. WSL2 claims 50% of host RAM by default — 8 GB of gpu-02's 16 GB.
+#    Set it explicitly and leave the Windows host ~5 GB.
+#
+#   [wsl2]
+#   networkingMode=mirrored
+#   memory=11GB
+#
+# Then, in an ADMIN PowerShell on gpu-02 (one time), open the Hyper-V firewall
+# for the WSL VM — mirrored mode still drops inbound RPC without it:
+#   Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+#
+# scripts/inventory.sh checks both of these from inside WSL and says so.
+required_networking_mode = "mirrored"
+memory_gb                = 11
 
 # ---------------------------------------------------------------------------
 # Planning fixture — OFFLINE WHAT-IF ONLY.
@@ -72,7 +115,7 @@ build_flags_windows = "-DGGML_VULKAN=ON -DGGML_RPC=ON"
 # at runtime reads it: infer/memory.py takes live NodeProfiles from the
 # registry, and only falls back here when explicitly asked for a planning run.
 #
-# These are ESTIMATES until scripts/inventory.{sh,ps1} has run on the machine.
+# These are ESTIMATES until scripts/inventory.sh has run on the machine.
 # capacity_report() refuses to bless a claim built from unverified numbers.
 # ---------------------------------------------------------------------------
 
@@ -87,11 +130,21 @@ verified = false
 
 [[planning.nodes]]
 id       = "gpu-02"
-machine  = "Ryzen 5 + RX 5700 XT"
-ram_mb   = 16384
-vram_mb  = 8192
-backend  = "vulkan"        # RDNA1 has no usable ROCm. Vulkan is the only option.
-os_class = "windows-desktop"
+machine  = "Ryzen 5 + RX 5700 XT (card unusable under WSL2 — see below)"
+# ram_mb is the WSL2 VM's allocation, not the host's 16 GB, because that is what
+# /proc/meminfo reports inside WSL and therefore what the node self-reports at
+# join. Set [wsl].memory_gb to match, or this fixture and the live profile
+# disagree and the planner oversizes gpu-02's slice.
+ram_mb   = 11264
+# Zero, and this is the cost of the WSL decision. WSL2 exposes the GPU as
+# /dev/dxg (D3D12), so Vulkan means Mesa's dzn layer, which llama.cpp's Vulkan
+# backend does not run reliably on. ROCm-in-WSL covers gfx1100+ only and the
+# 5700 XT is RDNA1/gfx1010. The 8 GB of VRAM is simply not reachable from here.
+# Dual-booting native Linux on this box is what gets it back (RADV on RDNA1 is
+# fine) — worth doing if the pool ever needs the headroom.
+vram_mb  = 0
+backend  = "cpu"
+os_class = "linux-wsl"
 verified = false
 
 [[planning.nodes]]
@@ -118,9 +171,10 @@ machine  = "i3-7100U"
 ram_mb   = 4096
 vram_mb  = 0
 backend  = "cpu"
-# Headless Linux leaves ~3.2 GiB usable here against ~2.2 GiB on Windows 11.
-# That ~1 GiB is the difference between this node holding a 4B replica and
-# sitting out the fan-out demo. Do not put a desktop session on it.
+# Headless leaves ~3.2 GiB usable here; a graphical session costs ~1.7 GiB of
+# that. This node is 0.9 GiB above the 4B replica threshold, so that session is
+# the difference between it holding a replica and sitting out the fan-out demo.
+# Never start a desktop on it.
 os_class = "linux-headless"
 verified = false
 

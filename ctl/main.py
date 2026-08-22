@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from contracts import NodeMetrics, NodeProfile
 from ctl.mock import MOCK_POOL_SECRET, MOCK_STATE
+from ctl.queue import JobQueue, NodeUnavailableError
 from ctl.registry import NodeRegistry
 
 
@@ -44,6 +45,8 @@ REGISTRY = NodeRegistry(
     missed_heartbeats_offline=3,
     on_replan=request_replan,
 )
+
+JOB_QUEUE = JobQueue(REGISTRY)
 
 
 def seed_registry() -> None:
@@ -86,6 +89,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await monitor_task
         except asyncio.CancelledError:
             pass
+
+        await JOB_QUEUE.close()
 
 
 app = FastAPI(
@@ -144,26 +149,36 @@ def get_plan(model: str = Query(min_length=1)) -> dict[str, Any]:
 
 
 @app.post("/api/jobs", status_code=201)
-def create_job(request: JobRequest) -> dict[str, Any]:
+async def create_job(request: JobRequest) -> dict[str, Any]:
     try:
-        job = MOCK_STATE.create_job(
+        job = await JOB_QUEUE.submit(
             kind=request.kind,
             payload=request.payload,
             fanout=request.fanout,
             node_id=request.node_id,
         )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="requested node not found") from exc
+    except NodeUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    return MOCK_STATE.job_response(job)
+    response = JOB_QUEUE.response(job.id)
+    if response is None:
+        raise HTTPException(status_code=500, detail="job was not stored")
+
+    return response
 
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
-    job = MOCK_STATE.get_job(job_id)
-    if job is None:
+    response = JOB_QUEUE.response(job_id)
+
+    if response is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return MOCK_STATE.job_response(job)
+
+    return response
 
 
 @app.get("/api/metrics")
@@ -189,26 +204,55 @@ async def send_feed(websocket: WebSocket) -> None:
         }
     )
 
-    last_sequence = 0
+    last_registry_sequence = 0
+    last_queue_sequence = 0
 
     try:
         while True:
             await websocket.send_json(get_metrics())
 
-            events = REGISTRY.events_after(last_sequence)
+            registry_events = REGISTRY.events_after(last_registry_sequence)
 
-            for event in events:
+            for event in registry_events:
                 await websocket.send_json(
                     {
                         "type": "event",
+                        "source": "registry",
                         **asdict(event),
                     }
                 )
-                last_sequence = event.sequence
+                last_registry_sequence = event.sequence
 
-            # Jobs and execution flow remain mocked during CP-2.
-            await websocket.send_json(MOCK_STATE.flow_frame())
+            queue_events = JOB_QUEUE.events_after(last_queue_sequence)
+
+            for event in queue_events:
+                event_data = asdict(event)
+
+                if event.node_id is None:
+                    # Queued, started, completed, failed and cancelled.
+                    await websocket.send_json(
+                        {
+                            "type": "event",
+                            "source": "queue",
+                            **event_data,
+                        }
+                    )
+                else:
+                    # Dispatch, retry and reassignment between ctl and a node.
+                    await websocket.send_json(
+                        {
+                            "type": "flow",
+                            "source": "ctl",
+                            "target": event.node_id,
+                            "label": event.event,
+                            **event_data,
+                        }
+                    )
+
+                last_queue_sequence = event.sequence
+
             await asyncio.sleep(1)
+
     except WebSocketDisconnect:
         return
 
