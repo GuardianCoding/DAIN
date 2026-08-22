@@ -160,8 +160,32 @@ class TestLiveProfileBudgets:
         assert budget_from_profile(profile, "linux-headless").vram_usable_mib == 0
 
     def test_carries_the_backend_through(self):
-        profile = FakeProfile("gpu-02", 16384, 11800, 8192, backend="vulkan")
-        assert budget_from_profile(profile, "windows-desktop").backend == "vulkan"
+        profile = FakeProfile("office-01", 8192, 7400, 0, backend="cpu")
+        assert budget_from_profile(profile, "linux-headless").backend == "cpu"
+
+    def test_a_wsl_node_is_budgeted_from_the_vm_allocation_not_the_host(self):
+        # Inside WSL, /proc/meminfo reports the VM's share, so the Windows
+        # host's cut is already gone before OS_RESERVE_MIB is consulted. A
+        # host-sized reserve here would double-count it and shrink gpu-02 twice.
+        profile = FakeProfile("gpu-02", ram_total_mb=11264, ram_free_mb=0, vram_total_mb=0)
+
+        result = budget_from_profile(profile, "linux-wsl")
+
+        assert result.ram_usable_mib == 11264 - OS_RESERVE_MIB["linux-wsl"]
+
+    def test_a_wsl_node_claims_no_vram(self):
+        # WSL2 exposes the GPU as /dev/dxg, which llama.cpp's Vulkan backend
+        # cannot use. If this ever reports VRAM, someone put a real driver in
+        # front of it and the planning fixture needs revisiting.
+        profile = FakeProfile("gpu-02", ram_total_mb=11264, ram_free_mb=10700, vram_total_mb=0)
+        assert budget_from_profile(profile, "linux-wsl").vram_usable_mib == 0
+
+    def test_rejects_a_windows_os_class(self):
+        # Windows support was removed when gpu-02 moved to WSL2. A profile still
+        # claiming it is a node nobody reconfigured — fail, do not guess.
+        profile = FakeProfile("gpu-02", 16384, 11800, 8192)
+        with pytest.raises(ValueError, match="os_class"):
+            budget_from_profile(profile, "windows-desktop")
 
     def test_rejects_unknown_os_class(self):
         profile = FakeProfile("x", ram_total_mb=8192, ram_free_mb=7000, vram_total_mb=0)
@@ -425,8 +449,9 @@ class TestRealClusterDecisions:
     """The shipped planning fixture and ladder, not toys.
 
     These lock in the two findings the demo plan rests on. They are ESTIMATES
-    until scripts/inventory.{sh,ps1} has run — if one of these starts failing
-    after real measurements land, the demo plan changed, not the test.
+    until scripts/inventory.sh has run on all five nodes — if one of these
+    starts failing after real measurements land, the demo plan changed, not the
+    test.
     """
 
     @pytest.fixture(scope="class")

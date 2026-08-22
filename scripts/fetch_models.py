@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fetch the DAIN model ladder in priority order.
 
-Python rather than shell because the cluster is a Linux/Windows mix and this has
-to behave identically on both. Needs Python 3.11+ (tomllib) and the `hf` CLI.
+Python rather than shell because it reads the same models.toml the rest of
+infer/ does, and a second parser for that file is a second thing to get wrong.
+Needs Python 3.11+ (tomllib) and the `hf` CLI.
 
     python3 scripts/fetch_models.py --list
     python3 scripts/fetch_models.py --dest /srv/dain/models --max-priority 4
