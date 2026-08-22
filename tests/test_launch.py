@@ -196,6 +196,15 @@ class TestServerCommand:
         assert command[command.index("-c") + 1] == "131072"
         assert command[command.index("-np") + 1] == "4"
 
+    def test_enables_jinja_so_the_model_template_carries_tool_calls(self, cluster):
+        # The agent layer's whole tool surface depends on this one flag. Without
+        # it llama.cpp substitutes a built-in template that has no tool-call
+        # grammar, and the model answers with prose DESCRIBING a call instead of
+        # emitting one — which reads as "the model is too small" rather than a
+        # missing argument. Asserted here because it is invisible at runtime
+        # until an agent tries to call a tool.
+        assert "--jinja" in llama_server_command(cluster, "/m/model.gguf", (HEAD,))
+
 
 class TestSoloProbe:
     def test_disables_fit_so_it_fails_loudly(self, cluster):

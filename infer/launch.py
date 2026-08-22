@@ -217,6 +217,14 @@ def llama_server_command(
         "-np", str(slots),
         "-fa", "on",
         "-ngl", "999",
+        # Use the GGUF's own chat template. Recent llama.cpp only parses tool
+        # calls out of the model's template, and without --jinja it falls back
+        # to a built-in that carries no tool-call grammar: the model then
+        # answers with prose describing the call it would make. That failure
+        # looks like "this model is too small for tools" rather than a missing
+        # argument, which is an expensive afternoon. The agent layer's entire
+        # tool surface hangs off this flag.
+        "--jinja",
         "--metrics",
         "--host", head.host,
         "--port", str(cluster.llama_port),
