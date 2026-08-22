@@ -29,8 +29,8 @@ export const navigation: NavItem[] = [
     description: "View connected nodes",
   },
   {
-    label: "Create Prompt",
-    href: "/new-prompt",
+    label: "Create Job",
+    href: "/create-job",
     icon: MessageSquarePlus,
     description: "Send a new prompt to the cluster",
   },
