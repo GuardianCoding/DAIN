@@ -18,21 +18,21 @@
 # Lachlan's NODE-2. A node joins with no arguments at all.
 mdns_service = "_dain._tcp.local."
 # Ports are conventions, not addresses — every node uses the same ones.
-rpc_port   = 50052
-ctl_port   = 8000
-node_port  = 9100
+rpc_port = 50052
+ctl_port = 8000
+node_port = 9100
 llama_port = 8080
 # Which NIC a node binds its RPC server to, resolved on the node itself.
 # rpc-server has NO authentication, so this must never resolve to a routable
 # or wireless interface. Set per node; unset means "the interface that has a
 # route to the control plane".
 bind_interface_env = "DAIN_FABRIC_IFACE"
-pool_secret_env    = "DAIN_POOL_SECRET"   # name only. Never commit the value.
+pool_secret_env = "DAIN_POOL_SECRET"     # name only. Never commit the value.
 
 [membership]
 # How the pool expands and contracts.
-heartbeat_interval_s      = 2
-missed_heartbeats_offline = 3    # 3 misses ~= 6 s to declare a node gone
+heartbeat_interval_s = 2
+missed_heartbeats_offline = 3 # 3 misses ~= 6 s to declare a node gone
 # Do not restart the head the instant one node flaps. A cable that is half out
 # will otherwise thrash llama-server in a loop for the whole demo.
 replan_debounce_s = 5
@@ -48,8 +48,8 @@ drain_grace_s = 10
 #
 # What must be IDENTICAL across nodes is the llama.cpp commit, not the path.
 [paths]
-models  = "/srv/dain/models"
-llama   = "/opt/dain/llama.cpp/build/bin"
+models = "/srv/dain/models"
+llama = "/opt/dain/llama.cpp/build/bin"
 scratch = "/var/tmp/dain"
 
 [search]
@@ -76,7 +76,7 @@ runtime_offline     = true
 # IS possible on the worker binary: every machine built from build_flags_worker
 # should hold a byte-identical rpc-server. scripts/distribute_llama.sh checks
 # the commit on all five and the checksum on the four that share a build.
-pinned_commit = "UNVERIFIED"
+pinned_commit = "d775b8967"
 
 # TWO builds from ONE commit, not one build for five nodes.
 #
@@ -89,7 +89,7 @@ pinned_commit = "UNVERIFIED"
 #
 # BUILD_SHARED_LIBS=OFF on the worker build so distribution is a plain file copy
 # with no libggml-*.so to chase.
-build_flags_head   = "-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_RPC=ON -DGGML_NATIVE=ON"
+build_flags_head = "-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_RPC=ON -DGGML_NATIVE=ON"
 build_flags_worker = "-DGGML_RPC=ON -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DBUILD_SHARED_LIBS=OFF"
 
 [wsl]
@@ -116,7 +116,7 @@ build_flags_worker = "-DGGML_RPC=ON -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=
 #
 # scripts/inventory.sh checks both of these from inside WSL and says so.
 required_networking_mode = "mirrored"
-memory_gb                = 11
+memory_gb = 11
 
 # ---------------------------------------------------------------------------
 # Planning fixture — OFFLINE WHAT-IF ONLY.
@@ -131,63 +131,55 @@ memory_gb                = 11
 # ---------------------------------------------------------------------------
 
 [[planning.nodes]]
-id       = "gpu-01"
-machine  = "Ryzen 5 9600X + RTX 5070 Ti"
-ram_mb   = 65536
-vram_mb  = 16384
-backend  = "cuda"          # Blackwell needs a recent CUDA toolkit; Vulkan is the fallback
+id = "main"
+ram_mb = 61880
+vram_mb = 16303
+backend = "cuda"
 os_class = "linux-desktop"
-verified = false
+verified = true
 
 [[planning.nodes]]
-id       = "gpu-02"
-machine  = "Ryzen 5 + RX 5700 XT (card unusable under WSL2 — see below)"
+id = "password3"                                                        # Liams pc
+machine = "Ryzen 5 + RX 5700 XT (card unusable under WSL2 — see below)"
 # ram_mb is the WSL2 VM's allocation, not the host's 16 GB, because that is what
 # /proc/meminfo reports inside WSL and therefore what the node self-reports at
 # join. Set [wsl].memory_gb to match, or this fixture and the live profile
 # disagree and the planner oversizes gpu-02's slice.
-ram_mb   = 11264
+ram_mb = 7901
 # Zero, and this is the cost of the WSL decision. WSL2 exposes the GPU as
 # /dev/dxg (D3D12), so Vulkan means Mesa's dzn layer, which llama.cpp's Vulkan
 # backend does not run reliably on. ROCm-in-WSL covers gfx1100+ only and the
 # 5700 XT is RDNA1/gfx1010. The 8 GB of VRAM is simply not reachable from here.
 # Dual-booting native Linux on this box is what gets it back (RADV on RDNA1 is
 # fine) — worth doing if the pool ever needs the headroom.
-vram_mb  = 0
-backend  = "cpu"
+vram_mb = 0
+backend = "cpu"
 os_class = "linux-wsl"
-verified = false
+verified = true
 
 [[planning.nodes]]
-id       = "office-01"
-machine  = "i7-6700"
-ram_mb   = 8192
-vram_mb  = 0
-backend  = "cpu"
+id = "password"
+ram_mb = 7157
+vram_mb = 0
+backend = "cpu"
 os_class = "linux-headless"
-verified = false
+verified = true
 
 [[planning.nodes]]
-id       = "office-02"
-machine  = "i7-6700 — CONTROL GROUP, keep identical to office-01"
-ram_mb   = 8192
-vram_mb  = 0
-backend  = "cpu"
+id = "password1"
+ram_mb = 7157
+vram_mb = 0
+backend = "cpu"
 os_class = "linux-headless"
-verified = false
+verified = true
 
 [[planning.nodes]]
-id       = "nuc-01"
-machine  = "i3-7100U"
-ram_mb   = 4096
-vram_mb  = 0
-backend  = "cpu"
-# Headless leaves ~3.2 GiB usable here; a graphical session costs ~1.7 GiB of
-# that. This node is 0.9 GiB above the 4B replica threshold, so that session is
-# the difference between it holding a replica and sitting out the fan-out demo.
-# Never start a desktop on it.
+id = "password3"
+ram_mb = 3255
+vram_mb = 0
+backend = "cpu"
 os_class = "linux-headless"
-verified = false
+verified = true
 
 # Power, for five compute nodes (the brief assumed four): gpu-01 ~320 W,
 # gpu-02 ~300 W, office pair ~190 W, nuc ~45 W, laptops/monitor/switch ~360 W
