@@ -17,6 +17,105 @@ from cost import (
     predict_tok_s,
 )
 
+"""
+model_spec — the per-model data contract that sched.plan.plan() and
+sched.cost.* need. This is NOT YET a real dataclass in contracts.py —
+it's currently passed around as a plain dict. This file documents the
+expected shape so integration doesn't require reverse-engineering it
+from cost.py's internals.
+
+WHO OWNS THIS DATA: Youssef (INF-3 model ladder, INF-4 MoE tuning).
+These are facts about the model files themselves — layer count, size on
+disk, KV cache footprint — not anything the scheduler measures or decides.
+
+WHO BUILDS THE DICT: currently unresolved. Two options:
+  (a) Abdallah's control plane resolves `model_id` -> this dict (e.g. via
+      a models.toml lookup) BEFORE calling plan(), and plan() just
+      receives the resolved dict.
+  (b) plan() takes a bare `model_id: str` and does the models.toml
+      lookup itself internally.
+Option (a) keeps sched/ free of file I/O and config-parsing concerns,
+which is why plan()'s current signature assumes it. CONFIRM THIS WITH
+ABDALLAH before wiring real integration — the mock currently takes a
+bare model_id string (MockControlPlane.plan(self, model_id: str)), which
+matches option (b), so this may need to change on one side or the other.
+
+--------------------------------------------------------------------------
+REQUIRED SHAPE (dict[str, Any] for now; candidate for a real dataclass
+once confirmed):
+
+{
+    "model_id": str,
+        # Must match the model_id used elsewhere (Assignment.model_id,
+        # the ?model= query param on GET /api/plan). Used purely as an
+        # identifier / for error messages — not read for any calculation.
+        # Example: "gpt-oss-120b"
+
+    "total_layers": int,
+        # L in the SCH-2 formula: t_token = Σ(layers_i / (L · tg_tok_s_i)) + hops·rtt
+        # Total transformer layers in the model. This is a fixed
+        # architectural fact of the model file, found in its config
+        # (e.g. HF config.json's num_hidden_layers, or llama.cpp's
+        # reported layer count via --list-devices / model metadata).
+        # Example: 48
+
+    "file_size_mb": int,
+        # Total size of the GGUF file on disk, in MB. Used by
+        # cost.layer_weight_mb() as file_size_mb / total_layers — a
+        # UNIFORM approximation assuming every layer is the same size.
+        # NOTE: this is an approximation, not exact for MoE models where
+        # individual layers can have different active-expert footprints.
+        # Good enough for the repair loop's purposes; flag to Youssef if
+        # per-layer size data becomes available and this should be
+        # replaced with a real per-layer breakdown instead.
+        # Example: 63000  (gpt-oss-120b, ~63 GB per Table 2.3)
+
+    "kv_mb_per_layer": float,
+        # KV cache memory (MB) that ONE layer consumes at the context
+        # length actually used in the demo. This is NOT a fixed model
+        # fact alone — it depends on:
+        #   - the model's architecture (hidden dim, num KV heads, head dim)
+        #   - the context length you're planning for (§3.3: "KV cache is
+        #     memory too... at long context it can exceed the model")
+        # THIS IS THE FIELD MOST LIKELY TO BE MISSING/WRONG RIGHT NOW.
+        # No test data has confirmed this number for any real model yet.
+        # If unavailable, cost.fits()/overflow_mb() will systematically
+        # underestimate memory footprint at long context — models that
+        # "fit" on paper may still OOM in practice. Get this from
+        # Youssef before trusting fits() near a node's memory ceiling.
+}
+
+--------------------------------------------------------------------------
+WHAT READS THIS DICT:
+
+  cost.layer_weight_mb(model_spec)
+      -> model_spec["file_size_mb"] / model_spec["total_layers"]
+
+  cost.node_footprint_mb(assignment, model_spec, node_id)
+      -> uses total_layers (via layer_weight_mb) and kv_mb_per_layer
+
+  cost.fits(assignment, profiles, metrics, model_spec)
+      -> calls node_footprint_mb per node, needs both above
+
+  cost.predict_tok_s(assignment, profiles, model_spec)
+      -> uses model_spec["total_layers"] directly (the "L" in the formula)
+
+  plan.plan(profiles, metrics, model_spec)
+      -> passes model_spec through to all of the above, and reads
+         model_spec["model_id"] once, for the Assignment.model_id field
+         and for RuntimeError messages.
+
+--------------------------------------------------------------------------
+MINIMAL EXAMPLE (values are illustrative, not measured):
+
+    model_spec = {
+        "model_id": "gpt-oss-120b",
+        "total_layers": 48,
+        "file_size_mb": 63_000,
+        "kv_mb_per_layer": 12.5,   # UNCONFIRMED — placeholder only
+    }
+"""
+
 def plan(
     profiles: list[NodeProfile],
     metrics: list[NodeMetrics],
