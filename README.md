@@ -97,4 +97,3 @@ uv run pytest tests/test_main.py tests/test_telemetry.py -q
 Control-plane state remains in memory, so restarting the server resets nodes,
 jobs and telemetry history. The pool secret is development-only authentication;
 production authentication and durable state are outside the current scope.
-
