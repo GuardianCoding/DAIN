@@ -162,26 +162,31 @@ class NodeRegistry:
         return emitted_events
 
     def list_profiles(self) -> list[NodeProfile]:
-        return [record.profile for record in self.nodes.values()]
+        with self.lock:
+            return [record.profile for record in self.nodes.values()]
 
     def get_record(self, node_id: str) -> NodeRecord | None:
-        return self.nodes.get(node_id)
+        with self.lock:
+            return self.nodes.get(node_id)
 
     def remove(self, node_id: str) -> bool:
-        return self.nodes.pop(node_id, None) is not None
+        with self.lock:
+            return self.nodes.pop(node_id, None) is not None
 
     def events_after(self, sequence: int) -> list[RegistryEvent]:
-        return [event for event in self.events if event.sequence > sequence]
+        with self.lock:
+            return [event for event in self.events if event.sequence > sequence]
 
     def latest_metrics(self) -> list[NodeMetrics]:
-        return [
-            record.metrics
-            for record in self.nodes.values()
-            if record.metrics is not None
-        ]
+        with self.lock:
+            return [
+                record.metrics
+                for record in self.nodes.values()
+                if record.metrics is not None
+            ]
 
     def reset(self) -> None:
-        self.nodes: dict[str, NodeRecord] = {}
-        self.events: list[RegistryEvent] = []
-        self.next_sequence = 1
-        self.lock = RLock()
+        with self.lock:
+            self.nodes.clear()
+            self.events.clear()
+            self.next_sequence = 1

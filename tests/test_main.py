@@ -5,9 +5,12 @@ import time
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
-from ctl.main import JOB_QUEUE, app, seed_registry
+from ctl import main as main_module
+from ctl.main import JOB_QUEUE, REGISTRY, TELEMETRY, app, seed_registry
 from ctl.mock import MOCK_POOL_SECRET, reset_mock_state
+from ctl.queue import QueueEvent
 
 client: TestClient
 
@@ -17,6 +20,16 @@ def run_control_plane():
     global client
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                text=(
+                    "dain_node_cpu_percent 20\n"
+                    "dain_node_ram_free_mb 6000\n"
+                    "dain_node_jobs_running 0\n"
+                ),
+            )
+
         body = json.loads(request.content)
 
         return httpx.Response(
@@ -32,16 +45,24 @@ def run_control_plane():
 
     original_client = JOB_QUEUE.client
     asyncio.run(original_client.aclose())
+    original_telemetry_client = TELEMETRY.client
+    original_telemetry_owns_client = TELEMETRY.owns_client
 
     mock_node_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     JOB_QUEUE.client = mock_node_client
     JOB_QUEUE.owns_client = False
+    TELEMETRY.client = mock_node_client
+    TELEMETRY.owns_client = False
 
-    with TestClient(app) as running_client:
-        client = running_client
-        yield
+    try:
+        with TestClient(app) as running_client:
+            client = running_client
+            yield
+    finally:
+        TELEMETRY.client = original_telemetry_client
+        TELEMETRY.owns_client = original_telemetry_owns_client
 
-    asyncio.run(mock_node_client.aclose())
+        asyncio.run(mock_node_client.aclose())
 
 
 @pytest.fixture(autouse=True)
@@ -201,6 +222,14 @@ def test_metrics_cover_every_node():
         "office-02",
         "mac-01",
     }
+    assert set(message["history"]) == {
+        "gpu-01",
+        "office-01",
+        "office-02",
+        "mac-01",
+    }
+    assert message["llama"] == {}
+    assert message["llama_history"] == []
     assert all(metric["timestamp"] > 0 for metric in message["nodes"])
 
 
@@ -257,12 +286,77 @@ def test_feed_exposes_all_four_frame_types():
     assert len(topology["nodes"]) == 4
 
     assert len(metrics["nodes"]) == 4
+    assert len(metrics["history"]) == 4
 
     assert event["message"]
 
     assert flow["source"] == "ctl"
     assert flow["job_id"] == created_job["id"]
     assert flow["target"] in created_job["assigned_nodes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "queue_events",
+    [
+        [],
+        [
+            QueueEvent(
+                sequence=1,
+                timestamp=1.0,
+                event="queued",
+                job_id="job-01",
+                node_id=None,
+                status="queued",
+                message="Job queued",
+            ),
+            QueueEvent(
+                sequence=2,
+                timestamp=2.0,
+                event="dispatch",
+                job_id="job-01",
+                node_id="gpu-01",
+                status="running",
+                message="Job dispatched",
+            ),
+        ],
+    ],
+    ids=["idle", "multiple-events"],
+)
+async def test_feed_waits_once_per_cycle(monkeypatch, queue_events):
+    class TwoCycleWebSocket:
+        def __init__(self) -> None:
+            self.metrics_frames = 0
+
+        async def accept(self) -> None:
+            return None
+
+        async def send_json(self, frame: dict) -> None:
+            if frame.get("type") != "metrics":
+                return
+
+            self.metrics_frames += 1
+            if self.metrics_frames == 2:
+                raise WebSocketDisconnect
+
+    waits: list[None] = []
+
+    async def fake_wait() -> None:
+        waits.append(None)
+
+    monkeypatch.setattr(main_module, "get_nodes", list)
+    monkeypatch.setattr(
+        main_module,
+        "get_metrics",
+        lambda: {"type": "metrics", "nodes": []},
+    )
+    monkeypatch.setattr(REGISTRY, "events_after", lambda _sequence: [])
+    monkeypatch.setattr(JOB_QUEUE, "events_after", lambda _sequence: queue_events)
+    monkeypatch.setattr(main_module, "_wait_for_next_feed_cycle", fake_wait)
+
+    await main_module.send_feed(TwoCycleWebSocket())
+
+    assert len(waits) == 1
 
 
 def test_heartbeat_updates_joined_node():
@@ -289,6 +383,11 @@ def test_heartbeat_updates_joined_node():
         "state": "idle",
         "missed_heartbeats": 0,
     }
+    frame = client.get("/api/metrics").json()
+    guest = next(metric for metric in frame["nodes"] if metric["node_id"] == "guest-01")
+
+    assert guest["ram_free_mb"] == 11000
+    assert frame["history"]["guest-01"][-1]["timestamp"] == 1000.0
 
 
 def test_heartbeat_rejects_unknown_node():
@@ -320,3 +419,58 @@ def test_heartbeat_rejects_mismatched_metrics():
     )
 
     assert response.status_code == 422
+
+
+def test_telemetry_background_task_is_running():
+    assert TELEMETRY.task is not None
+    assert not TELEMETRY.task.done()
+
+
+def test_feed_broadcasts_topology_changes():
+    with client.websocket_connect("/feed") as websocket:
+        initial = websocket.receive_json()
+        assert initial["type"] == "topology"
+
+        response = client.post(
+            "/api/nodes/join",
+            json=joined_node_payload(),
+        )
+        assert response.status_code == 201
+
+        for _ in range(20):
+            frame = websocket.receive_json()
+
+            if frame.get("type") != "topology":
+                continue
+
+            if any(node["id"] == "guest-01" for node in frame["nodes"]):
+                break
+        else:
+            pytest.fail("feed did not broadcast the topology change")
+
+
+def test_metrics_frame_matches_dashboard_contract():
+    frame = client.get("/api/metrics").json()
+
+    assert set(frame) == {
+        "type",
+        "nodes",
+        "history",
+        "llama",
+        "llama_history",
+        "errors",
+    }
+    assert frame["type"] == "metrics"
+
+    node_fields = {
+        "node_id",
+        "timestamp",
+        "cpu_percent",
+        "ram_free_mb",
+        "gpu_percent",
+        "vram_free_mb",
+        "jobs_running",
+    }
+
+    assert all(set(sample) == node_fields for sample in frame["nodes"])
+    assert all(len(samples) <= 60 for samples in frame["history"].values())
