@@ -215,3 +215,96 @@ async def test_non_heartbeat_mock_node_is_not_polled() -> None:
         await telemetry.poll_once()
 
         assert telemetry.frame()["nodes"] == []
+
+
+@pytest.mark.asyncio
+async def test_llama_prometheus_metrics_are_collected() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        assert str(request.url) == "http://gpu-01:8080/metrics"
+
+        return httpx.Response(
+            200,
+            text=(
+                "# HELP llama_tokens_predicted_total "
+                "Generated tokens\n"
+                "llama_tokens_predicted_total 123\n"
+                'llama_requests_processing{slot="0"} 1\n'
+            ),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        telemetry = TelemetryFanIn(
+            NodeRegistry(),
+            llama_metrics_url=("http://gpu-01:8080/metrics"),
+            client=client,
+        )
+
+        await telemetry.poll_once()
+
+        frame = telemetry.frame()
+
+        assert frame["llama"] == {
+            "llama_tokens_predicted_total": 123.0,
+            'llama_requests_processing{slot="0"}': 1.0,
+        }
+        assert frame["llama_history"] == [frame["llama"]]
+        assert frame["errors"] == {}
+
+
+@pytest.mark.asyncio
+async def test_llama_failure_keeps_last_good_sample() -> None:
+    responses = iter(
+        [
+            httpx.Response(
+                200,
+                text=("llama_tokens_predicted_total 10\n"),
+            ),
+            httpx.Response(503),
+        ]
+    )
+
+    async def handler(
+        _request: httpx.Request,
+    ) -> httpx.Response:
+        return next(responses)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        telemetry = TelemetryFanIn(
+            NodeRegistry(),
+            llama_metrics_url=("http://gpu-01:8080/metrics"),
+            client=client,
+        )
+
+        await telemetry.poll_once()
+        await telemetry.poll_once()
+
+        frame = telemetry.frame()
+
+        assert frame["llama"] == {"llama_tokens_predicted_total": 10.0}
+        assert len(frame["llama_history"]) == 1
+        assert "llama-server" in frame["errors"]
+
+
+@pytest.mark.asyncio
+async def test_empty_llama_metrics_are_reported() -> None:
+    async def handler(
+        _request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="# no samples\n",
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        telemetry = TelemetryFanIn(
+            NodeRegistry(),
+            llama_metrics_url=("http://gpu-01:8080/metrics"),
+            client=client,
+        )
+
+        await telemetry.poll_once()
+
+        error = telemetry.frame()["errors"]["llama-server"]
+        assert "no Prometheus metrics" in error

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from collections import deque
 from dataclasses import asdict
@@ -20,6 +21,7 @@ class TelemetryFanIn:
         timeout_s: float = 1.0,
         history_limit: int = 60,
         node_port: int = 9100,
+        llama_metrics_url: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if interval_s <= 0:
@@ -34,6 +36,11 @@ class TelemetryFanIn:
         self.timeout_s = timeout_s
         self.history_limit = history_limit
         self.node_port = node_port
+        self.llama_metrics_url = (
+            llama_metrics_url
+            if llama_metrics_url is not None
+            else os.getenv("DAIN_LLAMA_METRICS_URL")
+        )
 
         self.client = client
         self.owns_client = client is None
@@ -88,6 +95,12 @@ class TelemetryFanIn:
             if self._should_poll(profile)
         ]
 
+        llama_task = (
+            asyncio.create_task(self._poll_llama())
+            if self.llama_metrics_url is not None
+            else None
+        )
+
         results = await asyncio.gather(
             *(self._poll_node(profile) for profile in profiles),
             return_exceptions=True,
@@ -108,6 +121,18 @@ class TelemetryFanIn:
             with self.lock:
                 self.poll_errors.pop(profile.id, None)
 
+        if llama_task is not None:
+            try:
+                llama_metrics = await llama_task
+            except (httpx.HTTPError, ValueError) as exc:
+                with self.lock:
+                    self.poll_errors["llama-server"] = f"{type(exc).__name__}: {exc}"
+            else:
+                self._record_llama(llama_metrics)
+
+                with self.lock:
+                    self.poll_errors.pop("llama-server", None)
+
     def record(self, metrics: NodeMetrics) -> None:
         with self.lock:
             history = self.samples.setdefault(
@@ -116,6 +141,14 @@ class TelemetryFanIn:
             )
             history.append(metrics)
             self.latest[metrics.node_id] = metrics
+
+    def _record_llama(
+        self,
+        metrics: dict[str, float],
+    ) -> None:
+        with self.lock:
+            self.llama_metrics = dict(metrics)
+            self.llama_samples.append(dict(metrics))
 
     def reset(
         self,
@@ -204,6 +237,23 @@ class TelemetryFanIn:
                 )
             ),
         )
+
+    async def _poll_llama(self) -> dict[str, float]:
+        assert self.client is not None
+        assert self.llama_metrics_url is not None
+
+        response = await self.client.get(
+            self.llama_metrics_url,
+            timeout=self.timeout_s,
+        )
+        response.raise_for_status()
+
+        metrics = parse_prometheus(response.text)
+
+        if not metrics:
+            raise ValueError("llama-server returned no Prometheus metrics")
+
+        return metrics
 
     def _node_url(self, profile: NodeProfile) -> str:
         host = profile.host.rstrip("/")
