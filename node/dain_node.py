@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 from contracts import NodeMetrics, NodeProfile
 from node.auth import sign_join_challenge, verify_job_request
 from node.discovery import advertise_node, discover_control_plane
-from node.index import IndexNotReadyError, LocalFileIndex
+from node.index import EmbeddingUnavailableError, IndexNotReadyError, LocalFileIndex
 from node.sandbox import CommandSandbox, SandboxExecutionError, SandboxRejected
 
 LOG = logging.getLogger("dain.node")
@@ -583,7 +583,10 @@ async def refresh_index(request: LocalJobRequest) -> dict[str, Any]:
     if request.kind != "index":
         raise HTTPException(status_code=422, detail="kind must be index")
 
-    stats = await asyncio.to_thread(agent.search_index.refresh)
+    try:
+        stats = await asyncio.to_thread(agent.search_index.refresh)
+    except EmbeddingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "ok": True,
         "result": {
@@ -613,6 +616,8 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
         hits = await asyncio.to_thread(agent.search_index.search, query, limit)
     except IndexNotReadyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except EmbeddingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -621,6 +626,7 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
         "result": {
             "node_id": agent.profile.id,
             "query": query,
+            "embedding_model": agent.search_index.model_id,
             "shard_index": request.shard_index,
             "shard_count": request.shard_count,
             "hits": [

@@ -25,6 +25,8 @@ readonly ENV_FILE="${CONFIG_DIR}/node.env"
 readonly UNIT_FILE="${DAIN_SYSTEMD_DIR:-/etc/systemd/system}/${SERVICE_NAME}.service"
 readonly SCRATCH_ROOT="${DAIN_SCRATCH_ROOT:-/var/tmp/dain}"
 readonly INDEX_ROOT="${DAIN_INDEX_ROOT:-/srv/dain/index}"
+readonly EMBED_CACHE="${DAIN_EMBED_CACHE:-${CACHE_DIR}/fastembed}"
+readonly EMBED_MODEL="${DAIN_EMBED_MODEL:-BAAI/bge-small-en-v1.5}"
 readonly REPO_URL="${DAIN_REPO_URL:-https://github.com/GuardianCoding/DAIN.git}"
 readonly REPO_REF="${DAIN_REF:-main}"
 readonly UV_VERSION="${DAIN_UV_VERSION:-0.12.5}"
@@ -109,14 +111,15 @@ install_system_dependencies() {
   log "Installing Linux prerequisites"
   run apt-get update -qq
   run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    bubblewrap ca-certificates curl git iproute2 python3 python3-venv ufw
+    bubblewrap ca-certificates curl git iproute2 python3 python3-venv ufw util-linux
 }
 
 ensure_service_user() {
   if (( DRY_RUN )) || ! id "$DAIN_USER" >/dev/null 2>&1; then
     run useradd --system --home-dir "$INSTALL_ROOT" --shell /usr/sbin/nologin "$DAIN_USER"
   fi
-  run install -d -m 0755 "$INSTALL_ROOT" "$CACHE_DIR"
+  run install -d -m 0755 "$INSTALL_ROOT"
+  run install -d -o "$DAIN_USER" -g "$DAIN_USER" -m 0750 "$CACHE_DIR" "$EMBED_CACHE"
   run install -d -o "$DAIN_USER" -g "$DAIN_USER" -m 0700 "$SCRATCH_ROOT"
   run install -d -o "$DAIN_USER" -g "$DAIN_USER" -m 0750 "$INDEX_ROOT"
 }
@@ -167,6 +170,8 @@ write_environment_file() {
     printf 'DAIN_NODE_ID=%s\n' "$(environment_value "${DAIN_NODE_ID:-$(hostname -s)}")"
     printf 'DAIN_SCRATCH_ROOT=%s\n' "$(environment_value "$SCRATCH_ROOT")"
     printf 'DAIN_INDEX_ROOT=%s\n' "$(environment_value "$INDEX_ROOT")"
+    printf 'DAIN_EMBED_CACHE=%s\n' "$(environment_value "$EMBED_CACHE")"
+    printf 'DAIN_EMBED_MODEL=%s\n' "$(environment_value "$EMBED_MODEL")"
     if [[ -n "${DAIN_CTL:-}" ]]; then
       printf 'DAIN_CTL=%s\n' "$(environment_value "$DAIN_CTL")"
     fi
@@ -175,6 +180,14 @@ write_environment_file() {
     fi
   } >"$temporary"
   mv -f "$temporary" "$ENV_FILE"
+}
+
+prewarm_embedding_model() {
+  log "Caching local embedding model ${EMBED_MODEL}"
+  run runuser -u "$DAIN_USER" -- env \
+    PYTHONPATH="$APP_DIR" DAIN_EMBED_CACHE="$EMBED_CACHE" DAIN_EMBED_MODEL="$EMBED_MODEL" \
+    "${APP_DIR}/.venv/bin/python" -c \
+    'from node.index import LocalEmbeddingModel; LocalEmbeddingModel.from_environment().prewarm()'
 }
 
 write_systemd_unit() {
@@ -203,7 +216,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=${SCRATCH_ROOT} ${INDEX_ROOT}
+ReadWritePaths=${SCRATCH_ROOT} ${INDEX_ROOT} ${EMBED_CACHE}
 RestrictSUIDSGID=true
 
 [Install]
@@ -282,6 +295,7 @@ main() {
   fetch_agent
   install_python_environment
   write_environment_file
+  prewarm_embedding_model
   write_systemd_unit
   configure_static_ip
   configure_firewall

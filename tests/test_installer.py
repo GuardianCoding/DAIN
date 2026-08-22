@@ -43,6 +43,8 @@ def test_dry_run_covers_the_complete_install_without_exposing_secret(tmp_path):
     assert "bubblewrap" in result.stdout
     assert "git clone" in result.stdout
     assert "uv sync" in result.stdout
+    assert "LocalEmbeddingModel" in result.stdout
+    assert "BAAI/bge-small-en-v1.5" in result.stdout
     assert "install protected environment file" in result.stdout
     assert "systemctl enable --now dain-node" in result.stdout
     assert "Leaving network addressing unchanged" in result.stdout

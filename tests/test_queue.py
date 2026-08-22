@@ -408,13 +408,14 @@ async def test_search_merges_ranked_node_qualified_hits_from_three_nodes():
             json={
                 "ok": True,
                 "result": {
+                    "embedding_model": "test/semantic-small",
                     "hits": [
                         {
                             "path": "notes.md",
                             "score": scores[request.url.host],
                             "snippet": request.url.host,
                         }
-                    ]
+                    ],
                 },
             },
         )
@@ -437,6 +438,39 @@ async def test_search_merges_ranked_node_qualified_hits_from_three_nodes():
         "node-01:notes.md",
     ]
     assert [hit["score"] for hit in completed.result["hits"]] == [0.9, 0.8, 0.7]
+    assert completed.result["embedding_model"] == "test/semantic-small"
+
+    await queue.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_search_refuses_to_merge_scores_from_different_embedding_models():
+    registry = make_registry()
+    add_node(registry, "node-02")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model_id = "model/a" if request.url.host == "node-01.local" else "model/b"
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {
+                    "embedding_model": model_id,
+                    "hits": [{"path": "notes.md", "score": 0.8}],
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
+    job = await queue.submit("search", {"query": "telemetry"}, fanout=2)
+
+    completed = await queue.wait(job.id, timeout=1.0)
+
+    assert completed.status == "failed"
+    assert completed.result is not None
+    assert "different embedding models" in completed.result["errors"][0]["error"]
 
     await queue.close()
     await client.aclose()

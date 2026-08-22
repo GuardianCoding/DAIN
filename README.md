@@ -97,9 +97,12 @@ tampered requests before touching the filesystem. The pool secret is read from
 `DAIN_POOL_SECRET` and is never sent in a node-job request.
 
 Index refreshes are single-flight and bounded to 10,000 files, 256 MiB total,
-and 1 MiB per file. Search scores are corpus-independent so the controller can
-merge them across nodes. Each merged hit includes a unique `node_id:path`
-source, and `nodes_searched` identifies every machine that contributed.
+and 1 MiB per file. Search uses the 67 MB local
+`BAAI/bge-small-en-v1.5` model through FastEmbed; the installer downloads it
+once into `/var/cache/dain/fastembed`. All nodes report the model identifier,
+and cosine scores are corpus-independent and comparable across nodes. Each
+merged hit includes a unique `node_id:path` source, and `nodes_searched`
+identifies every machine that contributed.
 
 ## WebSocket frames
 
