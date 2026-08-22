@@ -353,6 +353,7 @@ async def test_client_rejection_is_not_retried_or_reassigned():
     assert completed.status == "failed"
     assert requested_hosts == ["node-01.local"]
     assert not any(event.event == "reassigned" for event in queue.events)
+    assert "index is not ready" in queue.events[-1].message
 
     await queue.close()
     await client.aclose()

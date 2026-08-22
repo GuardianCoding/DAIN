@@ -231,7 +231,10 @@ class JobQueue:
             job.finished_at = time.time()
             job.status = "failed" if errors else "done"
             event = "failed" if errors else "completed"
-            self._emit(event, job, None, f"Job {job.id} {job.status}")
+            message = f"Job {job.id} {job.status}"
+            if errors:
+                message = f"{message}: {errors[0]['error']}"
+            self._emit(event, job, None, message)
 
     async def _run_shard(
         self,

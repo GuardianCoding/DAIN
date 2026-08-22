@@ -5,14 +5,15 @@ One file, one command:
     DAIN_POOL_SECRET=... python -m node.dain_node --ctl 192.168.50.20:8000
 
 It profiles the machine, registers with the control plane, heartbeats every
-two seconds, exposes /health /profile /metrics /index /search, and supervises
-the local rpc-server. Set DAIN_INDEX_ROOT to the directory this node is allowed
-to index; it defaults to /srv/dain/index.
+two seconds, exposes /health /profile /metrics /index /search /exec, and
+supervises the local rpc-server. Set DAIN_INDEX_ROOT to the directory this node
+is allowed to index; it defaults to /srv/dain/index.
 
 Two contracts from the control plane (ctl/main.py) are load-bearing here:
 
-    POST /api/nodes/join                  {"profile": ..., "pool_secret": ...} -> 201 | 403
-    POST /api/nodes/{node_id}/heartbeat   {"metrics": ... | null}              -> 200 | 404
+    POST /api/nodes/join/challenge        {"node_id": ...}                -> nonce
+    POST /api/nodes/join                  {profile, nonce, signature}       -> token
+    POST /api/nodes/{node_id}/heartbeat   Bearer token + {"metrics": ...}  -> 200
 
 Neither takes a bare profile, and join is not a heartbeat: the registry
 counts missed heartbeats and declares a node offline after three of them
@@ -49,6 +50,7 @@ from contracts import NodeMetrics, NodeProfile
 from node.auth import sign_join_challenge, verify_job_request
 from node.discovery import advertise_node, discover_control_plane
 from node.index import IndexNotReadyError, LocalFileIndex
+from node.sandbox import CommandSandbox, SandboxExecutionError, SandboxRejected
 
 LOG = logging.getLogger("dain.node")
 
@@ -289,6 +291,7 @@ class NodeAgent:
     search_index: LocalFileIndex = field(
         default_factory=LocalFileIndex.from_environment
     )
+    sandbox: CommandSandbox = field(default_factory=CommandSandbox.from_environment)
 
     @property
     def join_url(self) -> str:
@@ -488,7 +491,7 @@ app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 class LocalJobRequest(BaseModel):
     job_id: str = Field(min_length=1)
-    kind: Literal["index", "search"]
+    kind: Literal["exec", "index", "search"]
     payload: dict[str, Any] = Field(default_factory=dict)
     shard_index: int = Field(ge=0)
     shard_count: int = Field(ge=1)
@@ -518,6 +521,7 @@ def configure(
     pool_secret: str,
     rpc_port: int = DEFAULT_RPC_PORT,
     search_index: LocalFileIndex | None = None,
+    sandbox: CommandSandbox | None = None,
 ) -> NodeAgent:
     """Install the agent state the routes and the lifespan read.
 
@@ -530,6 +534,7 @@ def configure(
         pool_secret=pool_secret,
         rpc_port=rpc_port,
         search_index=search_index or LocalFileIndex.from_environment(),
+        sandbox=sandbox or CommandSandbox.from_environment(),
     )
     app.state.agent = agent
     return agent
@@ -626,6 +631,48 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
                 }
                 for hit in hits
             ],
+        },
+    }
+
+
+@app.post("/exec")
+async def execute(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "exec":
+        raise HTTPException(status_code=422, detail="kind must be exec")
+
+    argv = request.payload.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+        raise HTTPException(
+            status_code=422, detail="payload.argv must be a list of strings"
+        )
+    cwd = request.payload.get("cwd", ".")
+    timeout_s = request.payload.get("timeout_s", 5.0)
+    output_cap_bytes = request.payload.get("output_cap_bytes", 64 * 1024)
+    if not isinstance(cwd, str):
+        raise HTTPException(status_code=422, detail="payload.cwd must be a string")
+
+    try:
+        result = await asyncio.to_thread(
+            agent.sandbox.execute,
+            argv,
+            cwd=cwd,
+            timeout_s=timeout_s,
+            output_cap_bytes=output_cap_bytes,
+            job_id=request.job_id,
+        )
+    except SandboxRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SandboxExecutionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "ok": result.ok,
+        "result": {
+            "node_id": agent.profile.id,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            **result.to_dict(),
         },
     }
 
