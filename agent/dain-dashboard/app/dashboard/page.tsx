@@ -24,9 +24,21 @@ function getRamUsage(node: any) {
 
 export default async function Dashboard() {
   const nodes = await getNodes();
-  console.log(nodes);
 
-  return (
+  if (!nodes) {
+    return (
+      <main className={styles.stage}>
+      <header className={styles.header}>
+        <div>
+          <p className={styles.kicker}>D.A.I.N</p>
+          <h1 className={styles.title}>No Available Nodes.</h1>
+        </div>
+      </header>
+      </main>
+    )
+  }
+
+  else return (
     <main className={styles.stage}>
       <header className={styles.header}>
         <div>
