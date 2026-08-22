@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 
 from contracts import NodeMetrics, NodeProfile
 from node.auth import sign_join_challenge, verify_job_request
+from node.discovery import advertise_node, discover_control_plane
 from node.index import IndexNotReadyError, LocalFileIndex
 
 LOG = logging.getLogger("dain.node")
@@ -463,6 +464,12 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
     agent = current_agent(scope)
     agent.rpc_proc = start_rpc_server(agent.profile.host, agent.rpc_port)
     beat = asyncio.create_task(heartbeat_loop(agent))
+    advertisement = None
+
+    try:
+        advertisement = await asyncio.to_thread(advertise_node, agent.profile)
+    except (OSError, RuntimeError, ValueError) as exc:
+        LOG.warning("mDNS node advertisement unavailable: %s", exc)
 
     try:
         yield
@@ -472,6 +479,8 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
             await beat
         stop_rpc_server(agent.rpc_proc)
         agent.rpc_proc = None
+        if advertisement is not None:
+            await asyncio.to_thread(advertisement.close)
 
 
 app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
@@ -645,10 +654,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="[node] %(levelname)s %(message)s")
     args = parse_args(argv)
 
-    if not args.ctl:
+    ctl = args.ctl
+    if not ctl:
+        LOG.info("no control plane configured; discovering %s", "_dain._tcp.local.")
+        ctl = discover_control_plane()
+
+    if not ctl:
         LOG.error(
-            "no control plane endpoint: pass --ctl host:port or set $%s "
-            "(NODE-2's mDNS discovery removes this argument)",
+            "no control plane discovered: pass --ctl host:port or set $%s",
             CTL_ENDPOINT_ENV,
         )
         return EXIT_MISCONFIGURED
@@ -660,10 +673,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Profile first: the join payload, /profile and the rpc-server bind address
     # all read it, and all three start with the server.
-    ctl_host = args.ctl.rsplit(":", 1)[0]
+    ctl_host = ctl.rsplit(":", 1)[0]
     fabric_ip = detect_fabric_ip(ctl_host)
     profile = build_local_profile(args.node_id or socket.gethostname(), fabric_ip)
-    configure(profile, ctl=args.ctl, pool_secret=pool_secret, rpc_port=args.rpc_port)
+    configure(profile, ctl=ctl, pool_secret=pool_secret, rpc_port=args.rpc_port)
 
     LOG.info(
         "profiled %s: %s, %s cores, %s MiB RAM, fabric %s",

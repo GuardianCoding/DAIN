@@ -389,12 +389,26 @@ def test_main_refuses_to_start_without_a_control_plane_endpoint(monkeypatch):
     # Arrange
     monkeypatch.delenv(dain_node.CTL_ENDPOINT_ENV, raising=False)
     monkeypatch.setenv(dain_node.POOL_SECRET_ENV, POOL_SECRET)
+    monkeypatch.setattr(dain_node, "discover_control_plane", lambda: None)
 
     # Act
     exit_code = dain_node.main([])
 
     # Assert — no address is baked in; NODE-2's mDNS is what removes the flag.
     assert exit_code == dain_node.EXIT_MISCONFIGURED
+
+
+def test_main_discovers_the_control_plane_without_an_argument(monkeypatch):
+    monkeypatch.delenv(dain_node.CTL_ENDPOINT_ENV, raising=False)
+    monkeypatch.setenv(dain_node.POOL_SECRET_ENV, POOL_SECRET)
+    monkeypatch.setattr(dain_node, "discover_control_plane", lambda: CTL)
+    monkeypatch.setattr(dain_node, "detect_fabric_ip", lambda _host: FABRIC_IP)
+    monkeypatch.setattr(dain_node.uvicorn, "run", lambda *_args, **_kwargs: None)
+
+    exit_code = dain_node.main(["--node-id", NODE_ID])
+
+    assert exit_code == dain_node.EXIT_OK
+    assert dain_node.current_agent().ctl == CTL
 
 
 # --------------------------------------------------------------------------
@@ -472,6 +486,7 @@ async def test_lifespan_starts_and_stops_the_rpc_server(monkeypatch, agent):
     proc = FakeProcess()
     monkeypatch.setattr(dain_node, "start_rpc_server", lambda host, port: proc)
     monkeypatch.setattr(dain_node, "heartbeat_loop", never_returns)
+    monkeypatch.setattr(dain_node, "advertise_node", lambda _profile: None)
 
     # Act
     async with dain_node.lifespan(dain_node.app):

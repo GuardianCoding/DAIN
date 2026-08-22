@@ -15,6 +15,7 @@ from ctl.mock import MOCK_POOL_SECRET, MOCK_STATE
 from ctl.queue import JobQueue, NodeUnavailableError
 from ctl.registry import NodeRegistry
 from ctl.telemetry import TelemetryFanIn
+from node.discovery import advertise_control_plane
 
 
 class JoinRequest(BaseModel):
@@ -96,6 +97,12 @@ async def _wait_for_next_feed_cycle() -> None:
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     monitor_task = asyncio.create_task(monitor_heartbeats())
     await TELEMETRY.start()
+    advertisement = None
+
+    try:
+        advertisement = await asyncio.to_thread(advertise_control_plane)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"mDNS control-plane advertisement unavailable: {exc}")
 
     try:
         yield
@@ -109,6 +116,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         await TELEMETRY.close()
         await JOB_QUEUE.close()
+        if advertisement is not None:
+            await asyncio.to_thread(advertisement.close)
 
 
 app = FastAPI(

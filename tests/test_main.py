@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 
 import httpx
@@ -12,6 +13,7 @@ from ctl.main import JOB_QUEUE, REGISTRY, TELEMETRY, app, seed_registry
 from ctl.mock import MOCK_POOL_SECRET, reset_mock_state
 from ctl.queue import QueueEvent
 from node.auth import sign_join_challenge
+from node.discovery import MDNS_DISABLED_ENV
 
 client: TestClient
 
@@ -48,6 +50,8 @@ def run_control_plane():
     asyncio.run(original_client.aclose())
     original_telemetry_client = TELEMETRY.client
     original_telemetry_owns_client = TELEMETRY.owns_client
+    original_mdns_disabled = os.environ.get(MDNS_DISABLED_ENV)
+    os.environ[MDNS_DISABLED_ENV] = "1"
 
     mock_node_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     JOB_QUEUE.client = mock_node_client
@@ -62,6 +66,11 @@ def run_control_plane():
     finally:
         TELEMETRY.client = original_telemetry_client
         TELEMETRY.owns_client = original_telemetry_owns_client
+
+        if original_mdns_disabled is None:
+            os.environ.pop(MDNS_DISABLED_ENV, None)
+        else:
+            os.environ[MDNS_DISABLED_ENV] = original_mdns_disabled
 
         asyncio.run(mock_node_client.aclose())
 
