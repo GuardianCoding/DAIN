@@ -46,7 +46,8 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from contracts import NodeMetrics, NodeProfile
-from node.index import LocalFileIndex
+from node.auth import verify_job_request
+from node.index import IndexNotReadyError, LocalFileIndex
 
 LOG = logging.getLogger("dain.node")
 
@@ -422,6 +423,24 @@ class LocalJobRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     shard_index: int = Field(ge=0)
     shard_count: int = Field(ge=1)
+    issued_at: int = Field(ge=0)
+    signature: str = Field(min_length=64, max_length=64)
+
+
+def authenticated_agent(request: LocalJobRequest) -> NodeAgent:
+    agent = current_agent()
+    if not verify_job_request(
+        agent.pool_secret,
+        job_id=request.job_id,
+        kind=request.kind,
+        payload=request.payload,
+        shard_index=request.shard_index,
+        shard_count=request.shard_count,
+        issued_at=request.issued_at,
+        signature=request.signature,
+    ):
+        raise HTTPException(status_code=HTTP_FORBIDDEN, detail="invalid job signature")
+    return agent
 
 
 def configure(
@@ -486,16 +505,17 @@ async def metrics() -> str:
 
 @app.post("/index")
 async def refresh_index(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
     if request.kind != "index":
         raise HTTPException(status_code=422, detail="kind must be index")
 
-    agent = current_agent()
     stats = await asyncio.to_thread(agent.search_index.refresh)
     return {
         "ok": True,
         "result": {
             "node_id": agent.profile.id,
             "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
             **stats,
         },
     }
@@ -503,6 +523,7 @@ async def refresh_index(request: LocalJobRequest) -> dict[str, Any]:
 
 @app.post("/search")
 async def search(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
     if request.kind != "search":
         raise HTTPException(status_code=422, detail="kind must be search")
 
@@ -514,9 +535,10 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise HTTPException(status_code=422, detail="payload.limit must be an integer")
 
-    agent = current_agent()
     try:
         hits = await asyncio.to_thread(agent.search_index.search, query, limit)
+    except IndexNotReadyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -526,7 +548,15 @@ async def search(request: LocalJobRequest) -> dict[str, Any]:
             "node_id": agent.profile.id,
             "query": query,
             "shard_index": request.shard_index,
-            "hits": hits,
+            "shard_count": request.shard_count,
+            "hits": [
+                {
+                    **hit,
+                    "node_id": agent.profile.id,
+                    "source": f"{agent.profile.id}:{hit['path']}",
+                }
+                for hit in hits
+            ],
         },
     }
 

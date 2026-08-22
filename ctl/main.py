@@ -47,7 +47,7 @@ REGISTRY = NodeRegistry(
     on_replan=request_replan,
 )
 
-JOB_QUEUE = JobQueue(REGISTRY)
+JOB_QUEUE = JobQueue(REGISTRY, pool_secret=MOCK_POOL_SECRET)
 TELEMETRY = TelemetryFanIn(REGISTRY)
 
 
