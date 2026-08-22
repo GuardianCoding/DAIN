@@ -2,8 +2,9 @@
 """Prove the fabric before blaming the code.
 
 Most "the cluster is broken" is "the network is broken", and this rules it out
-in about ninety seconds. Python rather than PowerShell because four nodes are
-Linux and one is Windows, and the checks have to agree across both.
+in about ninety seconds. Python rather than bash because the multicast socket
+options and the RTT measurements are fiddly enough that a testable
+implementation beats a shorter one — everything that can be bash already is.
 
     # on every node except one
     python3 scripts/check_fabric.py listen
@@ -163,7 +164,10 @@ def report(peers: list[Peer], rpc_port: int) -> int:
         print("\nNO PEERS ANSWERED.")
         print("  Multicast is not crossing the switch, or nothing is in `listen` mode.")
         print("  This is exactly what breaks mDNS join. Check, in order:")
-        print("    - a host firewall (Windows: the NIC must be Private, not Public)")
+        print("    - gpu-02 on WSL's default NAT: multicast does not cross the")
+        print("      virtual switch. Needs networkingMode=mirrored in .wslconfig,")
+        print("      plus Set-NetFirewallHyperVVMSetting -DefaultInboundAction Allow")
+        print("    - a host firewall blocking UDP 45454 or 5353 on the LAN subnet")
         print("    - a Wi-Fi adapter still up and stealing the route -- disable it")
         print("    - IGMP snooping on a managed switch with no querier")
         return 1
