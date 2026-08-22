@@ -27,6 +27,9 @@ class RaceRequest(BaseModel):
     task: str = Field(min_length=1)
     mode: Literal["serial", "fanout"]
 
+class HeartbeatRequest(BaseModel):
+    metrics: NodeMetrics | None = None
+
 
 app = FastAPI(title="DAIN mock control plane", version="0.1.0")
 app.add_middleware(
@@ -35,6 +38,12 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+REGISTRY = NodeRegistry(
+    heartbeat_interval_s=2.0,
+    missed_heartbeats_offline=3,
+    on_replan=request_replan,
 )
 
 
@@ -125,3 +134,32 @@ async def send_feed(websocket: WebSocket) -> None:
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
+
+@app.get("/api/nodes")
+def get_nodes() -> dict[str, Any]:
+    return [asdict(profile) for profile in REGISTRY.list_profiles()]
+
+@app.post("/api/nodes/join")
+def add_node() -> None:
+    REGISTRY.register(request.profile)
+
+
+@app.delete("/api/nodes/{node_id}")
+def delete_node() -> None:
+    REGISTRY.remove(node_id)
+
+
+@app.post("/api/nodes/{node_id}/heartbeat")
+def heartbeat(node_id: str, request: HeartbeatRequest):
+    try:
+        record = REGISTRY.heartbeat(node_id, request.metrics)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="node not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {
+        "node_id": record.profile.id,
+        "state": record.profile.state,
+        "missed_heartbeats": record.missed_heartbeats,
+    }
