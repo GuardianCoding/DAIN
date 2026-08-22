@@ -9,7 +9,8 @@ import {
   Activity,
 } from "lucide-react";
 
-// Stand-in data — replace with the real /api/nodes feed later.
+// Fake data
+// Real data populated by Abdallah's API
 const nodes = [
   {
     id: "gpu-01",
