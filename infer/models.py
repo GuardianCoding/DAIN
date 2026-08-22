@@ -22,7 +22,7 @@ FAST_LINK_MBPS = 200.0
 
 LADDER_PATH = Path(__file__).resolve().parent / "models.toml"
 
-REQUIRED_KEYS = ("role", "repo", "include", "size_gb", "priority")
+REQUIRED_KEYS = ("role", "repo", "include", "size_gb", "priority", "total_layers")
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,11 @@ class ModelSpec:
     params_total_b: float
     params_active_b: float
     priority: int
+    # Transformer blocks. The scheduler divides the model by this, so it is
+    # required rather than optional — a missing layer count is not a model we
+    # can place. Authoritative source is the GGUF header's `block_count`, or
+    # llama-server's loader log. See infer/spec.py.
+    total_layers: int
     claim: str
     notes: str
 
@@ -91,6 +96,17 @@ def _parse_spec(model_id: str, body: object) -> ModelSpec:
     if not isinstance(priority, int) or priority < 1:
         raise ValueError(f"models.{model_id}.priority must be an int >= 1, got {priority!r}")
 
+    # 0 means "nobody has read this model's block_count yet". Required to be
+    # present so adding a model forces the question, but permitted to be zero
+    # so an unmeasured rung does not break the whole ladder for every other
+    # caller. scheduler_spec() refuses to plan a zero rather than guessing.
+    total_layers = body["total_layers"]
+    if not isinstance(total_layers, int) or total_layers < 0:
+        raise ValueError(
+            f"models.{model_id}.total_layers must be an int >= 0 "
+            f"(0 = not yet measured), got {total_layers!r}"
+        )
+
     return ModelSpec(
         model_id=model_id,
         role=str(body["role"]),
@@ -100,6 +116,7 @@ def _parse_spec(model_id: str, body: object) -> ModelSpec:
         params_total_b=float(body.get("params_total_b", 0.0)),
         params_active_b=float(body.get("params_active_b", 0.0)),
         priority=priority,
+        total_layers=total_layers,
         claim=str(body.get("claim", "")).strip(),
         notes=str(body.get("notes", "")).strip(),
     )

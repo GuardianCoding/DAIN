@@ -29,6 +29,7 @@ size_gb         = 0.4
 params_total_b  = 0.6
 params_active_b = 0.6
 priority        = 1
+total_layers    = 28
 claim           = "Not demoed. This is the yardstick every node is measured with."
 notes = """
 Blocks SCH-1, SCH-2 and therefore the entire scheduler critical path.
@@ -46,6 +47,7 @@ size_gb         = 2.5
 params_total_b  = 4.0
 params_active_b = 4.0
 priority        = 2
+total_layers    = 36
 claim           = "Fan-out: one full copy per node, N independent subtasks at once."
 notes = """
 Sized against nuc-01's ~3.2 GiB usable headless. A graphical session costs
@@ -66,6 +68,7 @@ size_gb         = 20.9
 params_total_b  = 35.0
 params_active_b = 3.0
 priority        = 3
+total_layers    = 40
 claim           = "Most of the demo runs on this. 3B active is why it is usable at all."
 notes = """
 35B of capacity at 3B of compute per token — roughly a 10x decode advantage over
@@ -84,6 +87,7 @@ size_gb         = 11.5
 params_total_b  = 21.0
 params_active_b = 3.6
 priority        = 4
+total_layers    = 24 
 claim = """
 21 billion parameters running on two office PCs and a NUC with no GPU between
 them. 10.7 GiB of weights against a 7.0 GiB largest node: it loads on the three
@@ -107,6 +111,7 @@ size_gb         = 63.4
 params_total_b  = 117.0
 params_active_b = 5.1
 priority        = 5
+total_layers    = 36
 claim = """
 117 billion parameters on five machines in this room. Weights alone (59.0 GiB)
 DO fit gpu-01, so do not claim otherwise. The claim that survives scrutiny is
@@ -133,6 +138,7 @@ size_gb         = 21.0
 params_total_b  = 35.0
 params_active_b = 3.0
 priority        = 6
+total_layers    = 40
 claim           = "INF-5. Self-speculative decoding, no separate draft model."
 notes = """
 Flags are the 2026 names: --spec-type draft-mtp --spec-draft-n-max 3.
@@ -152,6 +158,7 @@ size_gb         = 25.0
 params_total_b  = 35.0
 params_active_b = 3.0
 priority        = 8
+total_layers    = 40
 claim           = "Not demoed. Insurance against the quantisation-over-RPC failure mode."
 notes = """
 Some Q4_K/Q5_K GGUFs hit assertion errors over RPC on awkward tensor shapes.
@@ -168,4 +175,5 @@ size_gb         = 0.6
 params_total_b  = 0.6
 params_active_b = 0.6
 priority        = 7
+total_layers    = 28
 claim           = "Lachlan's NODE-5 file index. Embedding is the one genuinely parallel workload."

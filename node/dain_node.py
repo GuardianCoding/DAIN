@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 from contracts import NodeMetrics, NodeProfile
 from node.auth import sign_join_challenge, verify_job_request
 from node.discovery import advertise_node, discover_control_plane
-from node.bench import BenchUnavailableError, LocalBench
+from node.bench import BenchUnavailableError, LocalBench, measure
 from node.index import EmbeddingUnavailableError, IndexNotReadyError, LocalFileIndex
 from node.infer import InferenceUnavailableError, LocalInference
 from node.sandbox import CommandSandbox, SandboxExecutionError, SandboxRejected
@@ -193,6 +193,61 @@ def build_local_profile(node_id: str, fabric_ip: str) -> NodeProfile:
         pp_tok_s=0.0,
         rtt_ms=0.0,
         state="joining",
+    )
+
+
+def calibrate_profile(profile: NodeProfile, bench: LocalBench) -> NodeProfile:
+    """SCH-1: fill tg_tok_s / pp_tok_s by measuring, before the node joins.
+
+    This is the ONLY place those two fields ever become non-zero. The chain the
+    scheduler depends on is:
+
+        measure() here -> the join payload -> REGISTRY.register()
+        -> REGISTRY.list_profiles() -> sched.plan(profiles, ...)
+
+    ctl computes nothing; the registry is a passthrough store. So a node that
+    never calibrates reports 0.0 forever, and cost.predict_tok_s() raises on it.
+
+    Runs before joining because REGISTRY.register() takes the profile as given
+    at join. (Re-registering does replace it, so a later re-join would also
+    publish a fresh number — but then GET /api/plan is wrong in the window
+    between, which is worse than a slower start.)
+
+    Never fatal: a node with no model or no llama-bench is still a useful node
+    for exec, index and search. It just cannot be placed by the scheduler.
+    """
+    if not bench.configured:
+        LOG.info(
+            "no $%s or $%s; joining uncalibrated (tg_tok_s stays 0.0, so this "
+            "node cannot be placed by the scheduler)",
+            "DAIN_BENCH_MODEL",
+            "DAIN_INFER_MODEL",
+        )
+        return profile
+
+    LOG.info("calibrating with llama-bench; this takes a minute on a slow node")
+    try:
+        result = asyncio.run(measure(bench))
+    except (BenchUnavailableError, ValueError) as exc:
+        LOG.warning("calibration failed, joining uncalibrated: %s", exc)
+        return profile
+
+    if not result.tg_tok_s:
+        LOG.warning("calibration produced no decode speed; joining uncalibrated")
+        return profile
+
+    LOG.info(
+        "calibrated %s: %.1f tok/s decode, %.1f tok/s prefill",
+        profile.id,
+        result.tg_tok_s,
+        result.pp_tok_s or 0.0,
+    )
+    # A new profile rather than a mutated one: /profile and the join payload
+    # both read it, and a half-updated profile is worse than an honest zero.
+    return replace(
+        profile,
+        tg_tok_s=result.tg_tok_s,
+        pp_tok_s=result.pp_tok_s or 0.0,
     )
 
 
@@ -785,6 +840,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_NODE_PORT)
     parser.add_argument("--rpc-port", type=int, default=DEFAULT_RPC_PORT)
     parser.add_argument("--node-id", default=None, help="defaults to the hostname")
+    parser.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        help="skip the llama-bench probe; joins with tg_tok_s = 0.0, which "
+        "means the scheduler cannot place this node",
+    )
     return parser.parse_args(argv)
 
 
@@ -814,6 +875,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     ctl_host = ctl.rsplit(":", 1)[0]
     fabric_ip = detect_fabric_ip(ctl_host)
     profile = build_local_profile(args.node_id or socket.gethostname(), fabric_ip)
+
+    # Before configure(), because the join payload is built from this profile
+    # and REGISTRY.register() stores whatever it is handed. This is where
+    # tg_tok_s stops being 0.0 and GET /api/plan becomes answerable.
+    if not args.no_calibrate:
+        profile = calibrate_profile(profile, LocalBench.from_environment())
+
     configure(
         profile,
         ctl=ctl,

@@ -101,6 +101,7 @@ def make_spec(size_gb: float, model_id: str = "test") -> ModelSpec:
         params_total_b=117.0,
         params_active_b=5.1,
         priority=1,
+        total_layers=24,
         claim="",
         notes="",
     )

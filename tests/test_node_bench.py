@@ -390,3 +390,103 @@ class TestBenchRoute:
         body = client.get("/metrics").text
 
         assert 'node_bench_available{node_id="office-01"} 1' in body
+
+
+class TestCalibration:
+    """SCH-1 — the only place tg_tok_s stops being 0.0.
+
+    The chain GET /api/plan depends on is:
+        calibrate_profile() -> join payload -> REGISTRY.register()
+        -> REGISTRY.list_profiles() -> sched.plan(profiles, ...)
+    ctl computes nothing, so a node that never calibrates reports 0.0 forever
+    and cost.predict_tok_s() raises on it.
+    """
+
+    def test_an_uncalibrated_profile_starts_at_zero(self):
+        # The precondition for everything below, and the current state of
+        # every node in the cluster.
+        assert make_profile().tg_tok_s == 0.0
+
+    def test_calibration_fills_both_speeds(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            bench_module.subprocess,
+            "run",
+            lambda *a, **kw: FakeCompleted(stdout=BENCH_JSON),
+        )
+
+        calibrated = dain_node.calibrate_profile(
+            make_profile(), usable_bench(tmp_path)
+        )
+
+        assert calibrated.tg_tok_s == 42.1
+        assert calibrated.pp_tok_s == 310.5
+
+    def test_the_original_profile_is_not_mutated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            bench_module.subprocess,
+            "run",
+            lambda *a, **kw: FakeCompleted(stdout=BENCH_JSON),
+        )
+        original = make_profile()
+
+        dain_node.calibrate_profile(original, usable_bench(tmp_path))
+
+        assert original.tg_tok_s == 0.0
+
+    def test_everything_else_on_the_profile_survives(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            bench_module.subprocess,
+            "run",
+            lambda *a, **kw: FakeCompleted(stdout=BENCH_JSON),
+        )
+
+        calibrated = dain_node.calibrate_profile(
+            make_profile(), usable_bench(tmp_path)
+        )
+
+        assert calibrated.id == NODE_ID
+        assert calibrated.host == "192.168.50.11"
+        assert calibrated.ram_total_mb == 8192
+
+    def test_an_unconfigured_node_still_joins(self):
+        # No model is not a failure: the node is still useful for exec, index
+        # and search. It just cannot be placed by the scheduler.
+        calibrated = dain_node.calibrate_profile(make_profile(), LocalBench())
+
+        assert calibrated.tg_tok_s == 0.0
+
+    def test_a_failed_bench_still_joins(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            bench_module.subprocess,
+            "run",
+            lambda *a, **kw: FakeCompleted(returncode=1, stderr="out of memory"),
+        )
+
+        calibrated = dain_node.calibrate_profile(
+            make_profile(), usable_bench(tmp_path)
+        )
+
+        assert calibrated.tg_tok_s == 0.0
+
+    def test_a_prefill_only_run_does_not_fake_a_decode_speed(
+        self, tmp_path, monkeypatch
+    ):
+        # tg_tok_s is the number the cost model divides by. Publishing a
+        # prefill figure in its place would be a silent ~10x error, so an
+        # absent decode row must leave the profile uncalibrated.
+        monkeypatch.setattr(
+            bench_module.subprocess,
+            "run",
+            lambda *a, **kw: FakeCompleted(stdout=json.dumps([PREFILL_ROW])),
+        )
+
+        calibrated = dain_node.calibrate_profile(
+            make_profile(), usable_bench(tmp_path)
+        )
+
+        assert calibrated.tg_tok_s == 0.0
+        assert calibrated.pp_tok_s == 0.0
+
+    def test_no_calibrate_flag_is_available(self):
+        assert dain_node.parse_args(["--no-calibrate"]).no_calibrate is True
+        assert dain_node.parse_args([]).no_calibrate is False
