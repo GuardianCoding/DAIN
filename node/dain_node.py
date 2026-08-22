@@ -5,8 +5,9 @@ One file, one command:
     DAIN_POOL_SECRET=... python -m node.dain_node --ctl 192.168.50.20:8000
 
 It profiles the machine, registers with the control plane, heartbeats every
-two seconds, exposes /health /profile /metrics, and supervises the local
-rpc-server.
+two seconds, exposes /health /profile /metrics /index /search, and supervises
+the local rpc-server. Set DAIN_INDEX_ROOT to the directory this node is allowed
+to index; it defaults to /srv/dain/index.
 
 Two contracts from the control plane (ctl/main.py) are load-bearing here:
 
@@ -33,17 +34,20 @@ import sys
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import psutil
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
 
 from contracts import NodeMetrics, NodeProfile
+from node.auth import verify_job_request
+from node.index import IndexNotReadyError, LocalFileIndex
 
 LOG = logging.getLogger("dain.node")
 
@@ -278,6 +282,9 @@ class NodeAgent:
     pool_secret: str
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_proc: subprocess.Popen[bytes] | None = None
+    search_index: LocalFileIndex = field(
+        default_factory=LocalFileIndex.from_environment
+    )
 
     @property
     def join_url(self) -> str:
@@ -410,11 +417,38 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 
+class LocalJobRequest(BaseModel):
+    job_id: str = Field(min_length=1)
+    kind: Literal["index", "search"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+    shard_index: int = Field(ge=0)
+    shard_count: int = Field(ge=1)
+    issued_at: int = Field(ge=0)
+    signature: str = Field(min_length=64, max_length=64)
+
+
+def authenticated_agent(request: LocalJobRequest) -> NodeAgent:
+    agent = current_agent()
+    if not verify_job_request(
+        agent.pool_secret,
+        job_id=request.job_id,
+        kind=request.kind,
+        payload=request.payload,
+        shard_index=request.shard_index,
+        shard_count=request.shard_count,
+        issued_at=request.issued_at,
+        signature=request.signature,
+    ):
+        raise HTTPException(status_code=HTTP_FORBIDDEN, detail="invalid job signature")
+    return agent
+
+
 def configure(
     profile: NodeProfile,
     ctl: str,
     pool_secret: str,
     rpc_port: int = DEFAULT_RPC_PORT,
+    search_index: LocalFileIndex | None = None,
 ) -> NodeAgent:
     """Install the agent state the routes and the lifespan read.
 
@@ -422,7 +456,11 @@ def configure(
     rpc-server binds the address this node actually reported at join.
     """
     agent = NodeAgent(
-        profile=profile, ctl=ctl, pool_secret=pool_secret, rpc_port=rpc_port
+        profile=profile,
+        ctl=ctl,
+        pool_secret=pool_secret,
+        rpc_port=rpc_port,
+        search_index=search_index or LocalFileIndex.from_environment(),
     )
     app.state.agent = agent
     return agent
@@ -463,6 +501,64 @@ async def metrics() -> str:
         f"# TYPE node_rpc_server_up gauge\n"
         f"node_rpc_server_up{label} {rpc_up}\n"
     )
+
+
+@app.post("/index")
+async def refresh_index(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "index":
+        raise HTTPException(status_code=422, detail="kind must be index")
+
+    stats = await asyncio.to_thread(agent.search_index.refresh)
+    return {
+        "ok": True,
+        "result": {
+            "node_id": agent.profile.id,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            **stats,
+        },
+    }
+
+
+@app.post("/search")
+async def search(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "search":
+        raise HTTPException(status_code=422, detail="kind must be search")
+
+    query = request.payload.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise HTTPException(status_code=422, detail="payload.query must not be empty")
+
+    limit = request.payload.get("limit", 5)
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise HTTPException(status_code=422, detail="payload.limit must be an integer")
+
+    try:
+        hits = await asyncio.to_thread(agent.search_index.search, query, limit)
+    except IndexNotReadyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "result": {
+            "node_id": agent.profile.id,
+            "query": query,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            "hits": [
+                {
+                    **hit,
+                    "node_id": agent.profile.id,
+                    "source": f"{agent.profile.id}:{hit['path']}",
+                }
+                for hit in hits
+            ],
+        },
+    }
 
 
 # --------------------------------------------------------------------------

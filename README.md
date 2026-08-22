@@ -55,6 +55,32 @@ DAIN_POOL_SECRET=local-development-only \
 This is a development mock, not production authentication. Never place a real
 pool secret in the repository.
 
+## Distributed file search
+
+Each node indexes only the directory configured by `DAIN_INDEX_ROOT`. Run an
+explicit `index` job before searching; a cold `/search` returns `409` instead
+of starting an unbounded filesystem walk inside the two-second search timeout.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs \
+  -H 'content-type: application/json' \
+  -d '{"kind":"index","payload":{},"fanout":4}'
+
+curl -X POST http://127.0.0.1:8000/api/jobs \
+  -H 'content-type: application/json' \
+  -d '{"kind":"search","payload":{"query":"telemetry","limit":10},"fanout":4}'
+```
+
+The controller signs every node-job request with a short-lived HMAC covering
+the complete request body. Nodes reject missing, stale, incorrectly signed or
+tampered requests before touching the filesystem. The pool secret is read from
+`DAIN_POOL_SECRET` and is never sent in a node-job request.
+
+Index refreshes are single-flight and bounded to 10,000 files, 256 MiB total,
+and 1 MiB per file. Search scores are corpus-independent so the controller can
+merge them across nodes. Each merged hit includes a unique `node_id:path`
+source, and `nodes_searched` identifies every machine that contributed.
+
 ## WebSocket frames
 
 The first frame is always a topology snapshot. Metrics frames follow at 2 Hz.

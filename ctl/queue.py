@@ -9,6 +9,7 @@ import httpx
 
 from contracts import Job, NodeProfile
 from ctl.registry import NodeRegistry
+from node.auth import sign_job_request
 
 JobKind = Literal["infer", "exec", "index", "search", "bench"]
 
@@ -29,6 +30,10 @@ class ShardExecutionError(RuntimeError):
     pass
 
 
+class NodeRejectedError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class QueueEvent:
     sequence: int
@@ -45,19 +50,27 @@ class JobQueue:
         self,
         registry: NodeRegistry,
         *,
+        pool_secret: str,
         client: httpx.AsyncClient | None = None,
         timeout_s: float = 2.0,
+        index_timeout_s: float = 30.0,
         per_node_limit: int = 1,
         node_port: int = 9100,
         endpoint_by_kind: dict[JobKind, str] | None = None,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be greater than zero")
+        if index_timeout_s <= 0:
+            raise ValueError("index_timeout_s must be greater than zero")
         if per_node_limit <= 0:
             raise ValueError("per_node_limit must be greater than zero")
+        if not pool_secret:
+            raise ValueError("pool_secret must not be empty")
 
         self.registry = registry
+        self.pool_secret = pool_secret
         self.timeout_s = timeout_s
+        self.index_timeout_s = index_timeout_s
         self.per_node_limit = per_node_limit
         self.node_port = node_port
         self.endpoint_by_kind = endpoint_by_kind or DEFAULT_ENDPOINTS.copy()
@@ -213,6 +226,8 @@ class JobQueue:
 
         with self.lock:
             job.result = {"shards": results, "errors": errors}
+            if job.kind == "search":
+                job.result.update(self._merge_search_results(job, results))
             job.finished_at = time.time()
             job.status = "failed" if errors else "done"
             event = "failed" if errors else "completed"
@@ -241,6 +256,10 @@ class JobQueue:
                         "node_id": node_id,
                         "result": result,
                     }
+                except NodeRejectedError as exc:
+                    raise ShardExecutionError(
+                        f"shard {shard_index} rejected by {node_id}: {exc}"
+                    ) from exc
                 except (httpx.HTTPError, NodeUnavailableError, ValueError) as exc:
                     last_error = exc
                     if attempt == 0:
@@ -294,17 +313,43 @@ class JobQueue:
                 )
 
             try:
+                issued_at = int(time.time())
+                request_body = {
+                    "job_id": job.id,
+                    "kind": job.kind,
+                    "payload": payload,
+                    "shard_index": shard_index,
+                    "shard_count": shard_count,
+                    "issued_at": issued_at,
+                }
+                request_body["signature"] = sign_job_request(
+                    self.pool_secret,
+                    job_id=job.id,
+                    kind=job.kind,
+                    payload=payload,
+                    shard_index=shard_index,
+                    shard_count=shard_count,
+                    issued_at=issued_at,
+                )
                 response = await self.client.post(
                     self._node_url(profile, self.endpoint_by_kind[job.kind]),
-                    json={
-                        "job_id": job.id,
-                        "kind": job.kind,
-                        "payload": payload,
-                        "shard_index": shard_index,
-                        "shard_count": shard_count,
-                    },
-                    timeout=self.timeout_s,
+                    json=request_body,
+                    timeout=(
+                        self.index_timeout_s if job.kind == "index" else self.timeout_s
+                    ),
                 )
+                if 400 <= response.status_code < 500:
+                    try:
+                        rejection = response.json()
+                    except ValueError:
+                        detail = response.text
+                    else:
+                        detail = (
+                            rejection.get("detail", response.text)
+                            if isinstance(rejection, dict)
+                            else response.text
+                        )
+                    raise NodeRejectedError(f"HTTP {response.status_code}: {detail}")
                 response.raise_for_status()
                 body = response.json()
                 if isinstance(body, dict) and body.get("ok") is False:
@@ -315,6 +360,62 @@ class JobQueue:
             finally:
                 with self.lock:
                     self.in_flight[node_id] = max(0, self.in_flight.get(node_id, 1) - 1)
+
+    def _merge_search_results(
+        self,
+        job: Job,
+        results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        merged_hits: list[dict[str, Any]] = []
+        nodes_searched: set[str] = set()
+
+        for shard in results:
+            node_id = shard["node_id"]
+            nodes_searched.add(node_id)
+            result = shard.get("result")
+            if not isinstance(result, dict):
+                continue
+
+            hits = result.get("hits", [])
+            if not isinstance(hits, list):
+                continue
+
+            for hit in hits:
+                if not isinstance(hit, dict):
+                    continue
+                path = hit.get("path")
+                score = hit.get("score")
+                if not isinstance(path, str) or not isinstance(score, (int, float)):
+                    continue
+
+                merged_hits.append(
+                    {
+                        **hit,
+                        "node_id": node_id,
+                        "source": f"{node_id}:{path}",
+                        "shard_index": shard["shard_index"],
+                    }
+                )
+
+        merged_hits.sort(
+            key=lambda hit: (
+                -hit["score"],
+                hit["node_id"],
+                hit["path"],
+            )
+        )
+        requested_limit = job.payload.get("limit", 5)
+        limit = (
+            requested_limit
+            if isinstance(requested_limit, int)
+            and not isinstance(requested_limit, bool)
+            and requested_limit > 0
+            else 5
+        )
+        return {
+            "hits": merged_hits[:limit],
+            "nodes_searched": sorted(nodes_searched),
+        }
 
     def _ranked_nodes(self, exclude: set[str] | None = None) -> list[str]:
         excluded = exclude or set()
