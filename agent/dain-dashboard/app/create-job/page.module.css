@@ -25,9 +25,9 @@
 
 .title {
   margin: 0;
-  font-size: 26px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: clamp(32px, 5vw, 52px);
+  line-height: 1;
+  letter-spacing: -0.05em;
 }
 
 .card {
