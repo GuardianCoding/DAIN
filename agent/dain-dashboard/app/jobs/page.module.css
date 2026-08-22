@@ -289,3 +289,30 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+/* Per-node generated text for infer jobs. */
+
+.completion {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #1e222a;
+  border-left: 2px solid #5965ff;
+  border-radius: 6px;
+  background: #0d1015;
+}
+
+.completionMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 7px;
+  color: #666d79;
+  font-size: 10px;
+}
+
+.completionText {
+  color: #dce0e6;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -50,6 +50,7 @@ from contracts import NodeMetrics, NodeProfile
 from node.auth import sign_join_challenge, verify_job_request
 from node.discovery import advertise_node, discover_control_plane
 from node.index import EmbeddingUnavailableError, IndexNotReadyError, LocalFileIndex
+from node.infer import InferenceUnavailableError, LocalInference
 from node.sandbox import CommandSandbox, SandboxExecutionError, SandboxRejected
 
 LOG = logging.getLogger("dain.node")
@@ -293,6 +294,7 @@ class NodeAgent:
         default_factory=LocalFileIndex.from_environment
     )
     sandbox: CommandSandbox = field(default_factory=CommandSandbox.from_environment)
+    inference: LocalInference = field(default_factory=LocalInference.from_environment)
 
     @property
     def join_url(self) -> str:
@@ -467,6 +469,10 @@ async def heartbeat_loop(
 async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
     agent = current_agent(scope)
     agent.rpc_proc = start_rpc_server(agent.profile.host, agent.rpc_port)
+    # No-op unless DAIN_INFER_MODEL names a GGUF on this machine. Deliberately
+    # not awaited: a large model takes minutes to load and this node must
+    # finish joining the pool meanwhile. /infer polls readiness per request.
+    agent.inference.start()
     beat = asyncio.create_task(heartbeat_loop(agent))
     advertisement = None
 
@@ -485,6 +491,8 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
             await beat
         stop_rpc_server(agent.rpc_proc)
         agent.rpc_proc = None
+        agent.inference.stop()
+        await agent.inference.aclose()
         if advertisement is not None:
             await asyncio.to_thread(advertisement.close)
 
@@ -494,7 +502,11 @@ app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 class LocalJobRequest(BaseModel):
     job_id: str = Field(min_length=1)
-    kind: Literal["exec", "index", "search"]
+    # "infer" belongs here even though ctl has always mapped infer -> /infer.
+    # While it was missing, a dispatched infer job was rejected by request
+    # validation before routing ever happened, so adding the route alone would
+    # not have been enough. "bench" stays absent because /bench does not exist.
+    kind: Literal["exec", "index", "search", "infer"]
     payload: dict[str, Any] = Field(default_factory=dict)
     shard_index: int = Field(ge=0)
     shard_count: int = Field(ge=1)
@@ -526,6 +538,7 @@ def configure(
     rpc_port: int = DEFAULT_RPC_PORT,
     search_index: LocalFileIndex | None = None,
     sandbox: CommandSandbox | None = None,
+    inference: LocalInference | None = None,
 ) -> NodeAgent:
     """Install the agent state the routes and the lifespan read.
 
@@ -540,6 +553,7 @@ def configure(
         rpc_port=rpc_port,
         search_index=search_index or LocalFileIndex.from_environment(),
         sandbox=sandbox or CommandSandbox.from_environment(),
+        inference=inference or LocalInference.from_environment(),
     )
     app.state.agent = agent
     return agent
@@ -579,6 +593,9 @@ async def metrics() -> str:
         f"# HELP node_rpc_server_up 1 when the local rpc-server is running\n"
         f"# TYPE node_rpc_server_up gauge\n"
         f"node_rpc_server_up{label} {rpc_up}\n"
+        f"# HELP node_infer_up 1 when this node has an inference backend\n"
+        f"# TYPE node_infer_up gauge\n"
+        f"node_infer_up{label} {int(agent.inference.running)}\n"
     )
 
 
@@ -684,6 +701,34 @@ async def execute(request: LocalJobRequest) -> dict[str, Any]:
             "shard_index": request.shard_index,
             "shard_count": request.shard_count,
             **result.to_dict(),
+        },
+    }
+
+
+@app.post("/infer")
+async def infer(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "infer":
+        raise HTTPException(status_code=422, detail="kind must be infer")
+
+    try:
+        result = await agent.inference.complete(request.payload)
+    except ValueError as exc:
+        # Bad prompt/max_tokens/temperature — the caller's fault, and fixable.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except InferenceUnavailableError as exc:
+        # No backend configured, still loading, or llama-server died. 503 so
+        # the queue's retry treats it as transient and tries another node,
+        # matching how /index reports a missing embedding model.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "result": {
+            "node_id": agent.profile.id,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            **result,
         },
     }
 

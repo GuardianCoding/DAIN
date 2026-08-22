@@ -42,9 +42,12 @@ const KIND_OPTIONS: {
   { id: "bench", label: "Bench", hint: "Run llama-bench, record numbers", icon: Gauge },
 ];
 
-// The node agent serves /health /profile /metrics /index /search /exec.
-// These two are mapped by the queue but not served, so they 404.
-const UNIMPLEMENTED_KINDS: JobKind[] = ["infer", "bench"];
+// The node agent serves /health /profile /metrics /index /search /exec /infer.
+// Only /bench is still mapped by the queue without being served, so it 404s.
+const UNIMPLEMENTED_KINDS: JobKind[] = ["bench"];
+
+const MAX_TOKEN_OPTIONS = [64, 128, 256, 512];
+const DEFAULT_MAX_TOKENS = 256; // matches node/infer.py
 
 const FANOUT_OPTIONS = [1, 2, 3, 4, 5];
 const MAX_PROMPT_CHARS = 8000; // ~2k tokens, §6.3 cap
@@ -103,6 +106,7 @@ export default function CreateJob() {
   const [command, setCommand] = useState("");
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(DEFAULT_SEARCH_LIMIT);
+  const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS);
   const [fanout, setFanout] = useState(1);
   const [nodeId, setNodeId] = useState("auto");
   const [state, setState] = useState<SubmitState>("idle");
@@ -124,7 +128,9 @@ export default function CreateJob() {
       case "index":
         return {};
       default:
-        return { prompt };
+        // infer and bench. max_tokens must be an int — node/infer.py rejects
+        // a string with 422 rather than coercing it.
+        return { prompt, max_tokens: maxTokens };
     }
   }
 
@@ -308,6 +314,29 @@ export default function CreateJob() {
               onChange={(e) => setPrompt(e.target.value)}
               rows={6}
             />
+          </div>
+        )}
+
+        {usesPrompt && (
+          <div className={styles.field}>
+            <span className={styles.fieldLabel}>Max tokens</span>
+            <div className={styles.pillRow}>
+              {MAX_TOKEN_OPTIONS.map((n) => (
+                <button
+                  type="button"
+                  key={n}
+                  className={styles.pillOption}
+                  data-active={maxTokens === n}
+                  onClick={() => setMaxTokens(n)}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <span className={styles.muted}>
+              Longer generations make the fan-out speed difference easier to
+              see, but every node has to finish before the job completes.
+            </span>
           </div>
         )}
 
