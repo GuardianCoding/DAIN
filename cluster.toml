@@ -1,0 +1,129 @@
+# cluster.toml — cluster-wide settings that are NOT node identity.
+#
+# There are deliberately no IP addresses in this file. Nodes discover the
+# control plane over mDNS, register themselves, and are addressed by whatever
+# they reported at join. A node that appears mid-demo is a first-class case, not
+# an exception, and a node that vanishes must not leave a stale address behind.
+#
+# Where addresses actually live:
+#   runtime   -> the control plane registry (GET /api/nodes), keyed by node id
+#   planning  -> nowhere; see [[planning.nodes]] below, which has no addresses
+#
+# One hard constraint this file cannot change: llama.cpp fixes its --rpc
+# endpoint list when llama-server starts. Expanding or contracting the pool
+# therefore means re-plan + restart the head, which is what [membership]
+# is tuned for.
+
+[discovery]
+# Lachlan's NODE-2. A node joins with no arguments at all.
+mdns_service = "_dain._tcp.local."
+# Ports are conventions, not addresses — every node uses the same ones.
+rpc_port   = 50052
+ctl_port   = 8000
+node_port  = 9100
+llama_port = 8080
+# Which NIC a node binds its RPC server to, resolved on the node itself.
+# rpc-server has NO authentication, so this must never resolve to a routable
+# or wireless interface. Set per node; unset means "the interface that has a
+# route to the control plane".
+bind_interface_env = "DAIN_FABRIC_IFACE"
+pool_secret_env    = "DAIN_POOL_SECRET"   # name only. Never commit the value.
+
+[membership]
+# How the pool expands and contracts.
+heartbeat_interval_s      = 2
+missed_heartbeats_offline = 3    # 3 misses ~= 6 s to declare a node gone
+# Do not restart the head the instant one node flaps. A cable that is half out
+# will otherwise thrash llama-server in a loop for the whole demo.
+replan_debounce_s = 5
+# The head alone is a valid cluster. Never block on a quorum.
+min_workers = 0
+# How long a draining node keeps serving before it is cut loose.
+drain_grace_s = 10
+
+# Paths differ by OS because this cluster is Linux everywhere except gpu-02.
+# What must be IDENTICAL across nodes is the llama.cpp commit, not the path.
+[paths.linux]
+models  = "/srv/dain/models"
+llama   = "/opt/dain/llama.cpp/build/bin"
+scratch = "/var/tmp/dain"
+
+[paths.windows]
+models  = "C:/dain/models"
+llama   = "C:/dain/llama.cpp/build/bin/Release"
+scratch = "C:/dain/scratch"
+
+[llama]
+# INF-1, rewritten for a mixed-OS cluster. "Distribute one binary and checksum
+# it" is impossible here — a Linux ELF and a Windows PE can never match. The
+# invariant that prevents the silent RPC handshake hang is the COMMIT.
+#
+#   Acceptance test (replaces the checksum test):
+#     every node reports this commit from `llama-server --version`.
+pinned_commit       = "UNVERIFIED"
+build_flags_linux   = "-DGGML_VULKAN=ON -DGGML_RPC=ON -DGGML_CUDA=ON"
+build_flags_windows = "-DGGML_VULKAN=ON -DGGML_RPC=ON"
+
+# ---------------------------------------------------------------------------
+# Planning fixture — OFFLINE WHAT-IF ONLY.
+#
+# This exists so capacity questions ("which models are worth downloading?") can
+# be answered before any node has joined. It carries no addresses and nothing
+# at runtime reads it: infer/memory.py takes live NodeProfiles from the
+# registry, and only falls back here when explicitly asked for a planning run.
+#
+# These are ESTIMATES until scripts/inventory.{sh,ps1} has run on the machine.
+# capacity_report() refuses to bless a claim built from unverified numbers.
+# ---------------------------------------------------------------------------
+
+[[planning.nodes]]
+id       = "gpu-01"
+machine  = "Ryzen 5 9600X + RTX 5070 Ti"
+ram_mb   = 65536
+vram_mb  = 16384
+backend  = "cuda"          # Blackwell needs a recent CUDA toolkit; Vulkan is the fallback
+os_class = "linux-desktop"
+verified = false
+
+[[planning.nodes]]
+id       = "gpu-02"
+machine  = "Ryzen 5 + RX 5700 XT"
+ram_mb   = 16384
+vram_mb  = 8192
+backend  = "vulkan"        # RDNA1 has no usable ROCm. Vulkan is the only option.
+os_class = "windows-desktop"
+verified = false
+
+[[planning.nodes]]
+id       = "office-01"
+machine  = "i7-6700"
+ram_mb   = 8192
+vram_mb  = 0
+backend  = "cpu"
+os_class = "linux-headless"
+verified = false
+
+[[planning.nodes]]
+id       = "office-02"
+machine  = "i7-6700 — CONTROL GROUP, keep identical to office-01"
+ram_mb   = 8192
+vram_mb  = 0
+backend  = "cpu"
+os_class = "linux-headless"
+verified = false
+
+[[planning.nodes]]
+id       = "nuc-01"
+machine  = "i3-7100U"
+ram_mb   = 4096
+vram_mb  = 0
+backend  = "cpu"
+# Headless Linux leaves ~3.2 GiB usable here against ~2.2 GiB on Windows 11.
+# That ~1 GiB is the difference between this node holding a 4B replica and
+# sitting out the fan-out demo. Do not put a desktop session on it.
+os_class = "linux-headless"
+verified = false
+
+# Power, for five compute nodes (the brief assumed four): gpu-01 ~320 W,
+# gpu-02 ~300 W, office pair ~190 W, nuc ~45 W, laptops/monitor/switch ~360 W
+# => ~1215 W = 5.3 A. Inside one 10 A circuit, but split across two outlets.
