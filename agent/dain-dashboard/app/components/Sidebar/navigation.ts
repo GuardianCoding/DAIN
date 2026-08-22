@@ -35,10 +35,10 @@ export const navigation: NavItem[] = [
     description: "Send a new prompt to the cluster",
   },
   {
-    label: "Prompts",
-    href: "/prompts",
+    label: "Jobs",
+    href: "/jobs",
     icon: Activity,
-    description: "Monitor status of running prompts",
+    description: "Monitor status of running jobs",
   },
   
 ];
