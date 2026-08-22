@@ -34,8 +34,8 @@ CLUSTER_TOML="${REPO_ROOT}/cluster.toml"
 
 LLAMA_SRC="${LLAMA_SRC:-/opt/dain/llama.cpp}"
 WORKER_BUILD_DIR="${LLAMA_SRC}/build-worker"
-WORKER_NODES="${WORKER_NODES:-gpu-02 office-01 office-02 nuc-01}"
-HEAD_NODE="${HEAD_NODE:-gpu-01}"
+WORKER_NODES="${WORKER_NODES:-password password1 password3 password4 abdallah}"
+HEAD_NODE="${HEAD_NODE:-main}"
 
 read_toml_string() {
   local key="$1"
@@ -56,11 +56,11 @@ verify_only=0
 # Workers need rpc-server to do their job, llama-server to answer --version for
 # the acceptance test, and llama-bench for Sean's SCH-1 calibration probe. The
 # worker build is static, so there are no .so files to chase.
-BINARIES=(rpc-server llama-server llama-bench llama-cli)
+BINARIES=(ggml-rpc-server llama-server llama-bench llama-cli)
 
 # --- Push ---------------------------------------------------------------------
 if [[ "${verify_only}" == "0" ]]; then
-  if [[ ! -x "${WORKER_BUILD_DIR}/bin/rpc-server" ]]; then
+  if [[ ! -x "${WORKER_BUILD_DIR}/bin/ggml-rpc-server" ]]; then
     echo "ERROR: no worker build at ${WORKER_BUILD_DIR}/bin." >&2
     echo "       Run ./scripts/build_llama.sh first." >&2
     exit 1
@@ -100,7 +100,7 @@ version_of() {
 }
 
 checksum_of() {
-  ssh "$1" "sha256sum '${LLAMA_BIN_DIR}/rpc-server' 2>/dev/null | cut -d' ' -f1"
+  ssh "$1" "sha256sum '${LLAMA_BIN_DIR}/ggml-rpc-server' 2>/dev/null | cut -d' ' -f1"
 }
 
 echo "--- commit agreement (the test that matters) -------------------"
@@ -142,7 +142,7 @@ for node in ${WORKER_NODES}; do
   [[ -n "${sum}" ]] && sums["${node}"]="${sum}"
 done
 
-if (( ${#sums[@]} > 1 )); then
+if ((${#sums[@]} > 1)); then
   distinct_sums="$(printf '%s\n' "${sums[@]}" | sort -u | wc -l | tr -d ' ')"
   echo
   if [[ "${distinct_sums}" == "1" ]]; then
@@ -164,8 +164,8 @@ if [[ "${PINNED_COMMIT}" == "UNVERIFIED" || -z "${PINNED_COMMIT}" ]]; then
   failed=1
 else
   echo "cluster.toml pins: ${PINNED_COMMIT}"
-  if [[ "${#versions[@]}" -gt 0 ]] \
-     && ! printf '%s\n' "${versions[@]}" | grep -qF "${PINNED_COMMIT}"; then
+  if [[ "${#versions[@]}" -gt 0 ]] &&
+    ! printf '%s\n' "${versions[@]}" | grep -qF "${PINNED_COMMIT}"; then
     echo "FAIL: the pinned commit does not appear in any node's --version."
     echo "      Either the pin is stale or the pool is running something else."
     failed=1
