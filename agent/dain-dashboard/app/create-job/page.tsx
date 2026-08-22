@@ -3,7 +3,11 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import styles from "./page.module.css";
-import { getNodes, createJob } from "../components/API/api";
+
+import { createJob } from "../components/API/api";
+import { useNodes } from "../../lib/feed/useNodes"
+import { useJobs } from "../../lib/feed/useJobs";
+
 import {
   Terminal, FileSearch, Search, Gauge, MessageSquare, Layers, Send, CheckCircle2,
 } from "lucide-react";
@@ -22,16 +26,9 @@ const FANOUT_OPTIONS = [1, 2, 3, 4, 5];
 type SubmitState = "idle" | "queued" | "success" | "error";
 
 export default function CreateJob() {
-  const [nodes, setNodes] = useState<[]>([]);
-  const [nodesError, setNodesError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    getNodes()
-      .then((res) => { if (!cancelled) setNodes(res); })
-      .catch((err) => { if (!cancelled) setNodesError(String(err)); });
-    return () => { cancelled = true; };
-  }, []);
+  const nodes = useNodes();
+  const { seedJob } = useJobs();
 
   const nodeNames = nodes.map((n) => n.id);
 
@@ -52,12 +49,8 @@ export default function CreateJob() {
     setState("queued");
 
     try {
-      await createJob(
-        kind,
-        { prompt },
-        fanout,
-        nodeId === "auto" ? null : nodeId
-      );
+      const job = await createJob(kind, { prompt }, fanout, nodeId === "auto" ? null : nodeId);
+      seedJob(job); // row appears on /jobs immediately, before any feed frame
 
       setState("success");
       setPrompt("");
@@ -173,7 +166,9 @@ export default function CreateJob() {
                 </button>
               ))}
             </div>
-            {nodesError && <span className={styles.countWarn}>nodes unavailable: {nodesError}</span>}
+            {nodeNames.length === 0 && (
+              <span className={styles.countWarn}>waiting for nodes to join…</span>
+            )}
           </div>
         )}
 
