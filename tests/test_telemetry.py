@@ -1,3 +1,6 @@
+import asyncio
+import logging
+
 import httpx
 import pytest
 
@@ -339,3 +342,40 @@ async def test_poll_once_accepts_real_node_agent_metrics() -> None:
         assert node["ram_free_mb"] == 5500
         assert node["jobs_running"] == 0
         assert frame["errors"] == {}
+
+
+@pytest.mark.asyncio
+async def test_background_loop_survives_unexpected_poll_error(
+    monkeypatch,
+    caplog,
+) -> None:
+    telemetry = TelemetryFanIn(
+        NodeRegistry(),
+        interval_s=0.001,
+    )
+    second_cycle_started = asyncio.Event()
+    keep_second_cycle_running = asyncio.Event()
+    calls = 0
+
+    async def poll_once() -> None:
+        nonlocal calls
+        calls += 1
+
+        if calls == 1:
+            raise RuntimeError("unexpected poll failure")
+
+        second_cycle_started.set()
+        await keep_second_cycle_running.wait()
+
+    monkeypatch.setattr(telemetry, "poll_once", poll_once)
+
+    with caplog.at_level(logging.ERROR):
+        task = asyncio.create_task(telemetry._run())
+        await asyncio.wait_for(second_cycle_started.wait(), timeout=1.0)
+
+        assert not task.done()
+        assert "telemetry polling cycle failed" in caplog.text
+        assert "RuntimeError" in telemetry.frame()["errors"]["telemetry"]
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

@@ -80,6 +80,10 @@ async def monitor_heartbeats() -> None:
         REGISTRY.sweep()
 
 
+async def _wait_for_next_feed_cycle() -> None:
+    await asyncio.sleep(TELEMETRY.interval_s)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     monitor_task = asyncio.create_task(monitor_heartbeats())
@@ -255,7 +259,8 @@ async def send_feed(websocket: WebSocket) -> None:
                     )
 
                 last_queue_sequence = event.sequence
-                await asyncio.sleep(TELEMETRY.interval_s)
+
+            await _wait_for_next_feed_cycle()
 
     except WebSocketDisconnect:
         return

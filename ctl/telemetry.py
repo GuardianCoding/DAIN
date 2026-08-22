@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import time
 from collections import deque
@@ -10,6 +11,8 @@ import httpx
 
 from contracts import NodeMetrics, NodeProfile
 from ctl.registry import NodeRegistry
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TelemetryFanIn:
@@ -80,7 +83,18 @@ class TelemetryFanIn:
 
         while True:
             started_at = loop.time()
-            await self.poll_once()
+
+            try:
+                await self.poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                with self.lock:
+                    self.poll_errors["telemetry"] = f"{type(exc).__name__}: {exc}"
+                LOGGER.exception("telemetry polling cycle failed")
+            else:
+                with self.lock:
+                    self.poll_errors.pop("telemetry", None)
 
             elapsed = loop.time() - started_at
             delay = max(0.0, self.interval_s - elapsed)
