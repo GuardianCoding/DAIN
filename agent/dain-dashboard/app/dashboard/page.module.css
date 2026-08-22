@@ -45,6 +45,14 @@
   letter-spacing: 0.12em;
 }
 
+/* A dead feed must be visible. Silence used to be indistinguishable from an
+   idle cluster. */
+.headerStatus[data-connected="false"] {
+  border-color: rgba(248, 113, 113, 0.25);
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.07);
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -119,14 +127,33 @@
   box-shadow: 0 0 0 3px rgba(115, 121, 133, 0.08);
 }
 
-.dot[data-state="joined"] {
+/* contracts.NodeState is joining | idle | computing | degraded | offline.
+   "joined" was never one of them, so healthy nodes fell through to the grey
+   default. Grey is now reserved for a state we genuinely don't recognise. */
+
+.dot[data-state="idle"] {
   background: #4ade80;
   box-shadow: 0 0 10px rgba(74, 222, 128, 0.6);
+}
+
+.dot[data-state="computing"] {
+  background: #5965ff;
+  box-shadow: 0 0 10px rgba(89, 101, 255, 0.65);
 }
 
 .dot[data-state="joining"] {
   background: #facc15;
   box-shadow: 0 0 10px rgba(250, 204, 21, 0.5);
+}
+
+.dot[data-state="degraded"] {
+  background: #fb923c;
+  box-shadow: 0 0 10px rgba(251, 146, 60, 0.5);
+}
+
+.dot[data-state="offline"] {
+  background: #f87171;
+  box-shadow: 0 0 10px rgba(248, 113, 113, 0.45);
 }
 
 .hostname {
@@ -233,12 +260,20 @@
   background: #737985;
 }
 
-.state[data-state="joined"] {
+.state[data-state="idle"] {
   color: #4ade80;
 }
 
-.state[data-state="joined"] span {
+.state[data-state="idle"] span {
   background: #4ade80;
+}
+
+.state[data-state="computing"] {
+  color: #8b95ff;
+}
+
+.state[data-state="computing"] span {
+  background: #5965ff;
 }
 
 .state[data-state="joining"] {
@@ -247,6 +282,22 @@
 
 .state[data-state="joining"] span {
   background: #facc15;
+}
+
+.state[data-state="degraded"] {
+  color: #fb923c;
+}
+
+.state[data-state="degraded"] span {
+  background: #fb923c;
+}
+
+.state[data-state="offline"] {
+  color: #f87171;
+}
+
+.state[data-state="offline"] span {
+  background: #f87171;
 }
 
 @media (max-width: 600px) {

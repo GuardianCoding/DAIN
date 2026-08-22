@@ -1,6 +1,7 @@
 // lib/feed/FeedProvider.tsx
 // Opens exactly ONE WebSocket to /feed for the whole app and derives
-// long-lived state (nodes, jobs) directly in the provider, not per-hook.
+// long-lived state (nodes, metrics, jobs) directly in the provider, not
+// per-hook.
 //
 // Why state lives here rather than in each hook: "topology" is sent ONCE,
 // right when the socket opens. If we only exposed the latest raw frame,
@@ -10,10 +11,10 @@
 // state in the provider means every consumer — no matter when it mounts —
 // reads the current picture, not a stream it had to be present for.
 //
-// NOTE on metrics frames: get_metrics() is sent as
-// `await websocket.send_json(get_metrics())` with no "type" key added,
-// unlike every other frame. We tag it "metrics" when "type" is absent —
-// confirm this holds for your actual get_metrics() shape.
+// Metrics: ctl's TelemetryFanIn.frame() DOES tag itself "type": "metrics"
+// (an earlier note here claimed it didn't). We keep only the latest sample
+// per node and drop `history`, which re-sends up to 60 samples per node on
+// every frame at 2 Hz and which nothing renders.
 
 "use client";
 
@@ -25,11 +26,13 @@ import {
   useState,
   ReactNode,
 } from "react";
-import type { Frame, NodeInfo, Job } from "./types";
+import { API_BASE, FEED_URL } from "../config";
+import type { Frame, MetricsFrame, NodeInfo, NodeMetrics, Job } from "./types";
 
 type FeedContextValue = {
   connected: boolean;
   nodes: NodeInfo[];
+  metrics: Map<string, NodeMetrics>;
   jobs: Job[];
   seedJob: (job: Job) => void;
   refreshJob: (id: string) => Promise<void>;
@@ -38,30 +41,35 @@ type FeedContextValue = {
 const FeedContext = createContext<FeedContextValue>({
   connected: false,
   nodes: [],
+  metrics: new Map(),
   jobs: [],
   seedJob: () => {},
   refreshJob: async () => {},
 });
 
-const FEED_URL =
-  process.env.NEXT_PUBLIC_FEED_URL;
-// Same host as the feed, but http(s) — used for the one-off REST calls this
-// provider makes (job hydration). Relative fetch("/api/...") would instead
-// hit the Next.js app's own origin, not the ctl backend, and 404 silently.
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL;
 const RECONNECT_MS = 2000;
 const STALE_MS = 10_000;
 
 export function FeedProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [nodes, setNodes] = useState<Map<string, NodeInfo>>(new Map());
+  const [metrics, setMetrics] = useState<Map<string, NodeMetrics>>(new Map());
   const [jobs, setJobs] = useState<Map<string, Job>>(new Map());
+  // Mirror of `jobs` readable from the socket callbacks, which are created once
+  // and would otherwise close over the first render's Map forever. Written in
+  // an effect, not during render: mutating a ref while rendering is what
+  // react-hooks/refs flags, and it misbehaves under concurrent rendering.
   const jobsRef = useRef(jobs);
-  jobsRef.current = jobs;
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectRef = useRef<ReturnType<typeof setTimeout>>();
+  // Explicit `undefined` argument: React 19's types reject the zero-arg
+  // overload of useRef, and `next build` typechecks where `next dev` does not.
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   function upsertJob(job_id: string, patch: Partial<Job>) {
     setJobs((prev) => {
@@ -93,8 +101,24 @@ export function FeedProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    if (frame.type === "metrics") {
+      const samples = (frame as MetricsFrame).nodes;
+      if (!Array.isArray(samples)) return;
+      setMetrics((prev) => {
+        const next = new Map(prev);
+        for (const sample of samples) {
+          if (sample?.node_id) next.set(sample.node_id, sample);
+        }
+        return next;
+      });
+      return;
+    }
+
     if (frame.type === "event" && frame.source === "registry") {
-      const id = (frame as any).node_id ?? (frame as any).id;
+      // Registry events name the node as `node_id`; a few older frames used
+      // `id`. Both arrive through the frame's index signature as `unknown`.
+      const raw = frame.node_id ?? frame.id;
+      const id = typeof raw === "string" ? raw : undefined;
       if (!id) return;
       setNodes((prev) => {
         const next = new Map(prev);
@@ -124,16 +148,35 @@ export function FeedProvider({ children }: { children: ReactNode }) {
       });
       return;
     }
-    // metrics frames: not accumulated here — add a `metrics` state if a
-    // page needs live numbers, following the same pattern as nodes/jobs.
   }
 
   useEffect(() => {
     let cancelled = false;
 
+    function scheduleReconnect() {
+      if (cancelled) return;
+      clearTimeout(reconnectRef.current);
+      reconnectRef.current = setTimeout(connect, RECONNECT_MS);
+    }
+
     function connect() {
       if (cancelled) return;
-      const ws = new WebSocket(FEED_URL);
+
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(FEED_URL);
+      } catch (err) {
+        // A malformed URL throws RIGHT HERE, synchronously, before any handler
+        // could be attached — so without this catch there is no onclose to arm
+        // the retry and the feed stays dead forever, silently. That is exactly
+        // what an unset NEXT_PUBLIC_FEED_URL used to do; lib/config.ts now
+        // supplies a default, and this keeps a typo'd override recoverable.
+        console.error(`feed: cannot open WebSocket to "${FEED_URL}"`, err);
+        setConnected(false);
+        scheduleReconnect();
+        return;
+      }
+
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -146,15 +189,28 @@ export function FeedProvider({ children }: { children: ReactNode }) {
 
       ws.onmessage = (msg) => {
         if (cancelled) return;
-        const raw = JSON.parse(msg.data);
-        const frame: Frame = raw.type ? raw : { type: "metrics", ...raw };
+        let frame: Frame;
+        try {
+          const raw = JSON.parse(msg.data);
+          frame = raw.type ? raw : { type: "metrics", ...raw };
+        } catch (err) {
+          // One unparseable frame must not take down the socket.
+          console.warn("feed: dropping unparseable frame", err);
+          return;
+        }
         handleFrame(frame);
+      };
+
+      // The browser always fires close after error, so the retry is armed
+      // there; this exists so the reason reaches the console.
+      ws.onerror = () => {
+        if (!cancelled) console.warn(`feed: socket error on ${FEED_URL}`);
       };
 
       ws.onclose = () => {
         if (cancelled) return;
         setConnected(false);
-        reconnectRef.current = setTimeout(connect, RECONNECT_MS);
+        scheduleReconnect();
       };
     }
 
@@ -179,6 +235,12 @@ export function FeedProvider({ children }: { children: ReactNode }) {
         wsRef.current.close();
       }
     };
+    // Deliberately empty: this effect owns the single long-lived socket for
+    // the whole app. Including handleFrame/refreshJob would tear the socket
+    // down and reconnect on every render, which is the exact bug the
+    // one-provider design exists to prevent. Both close over setState updater
+    // functions and module-level constants only, so neither goes stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function seedJob(job: Job) {
@@ -190,6 +252,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
       value={{
         connected,
         nodes: [...nodes.values()],
+        metrics,
         jobs: [...jobs.values()],
         seedJob,
         refreshJob,

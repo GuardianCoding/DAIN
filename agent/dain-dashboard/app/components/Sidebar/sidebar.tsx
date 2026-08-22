@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import styles from "./page.module.css";
+import { useFeed } from "../../../lib/feed/FeedProvider";
 import {
   navigation,
   secondaryNavigation,
@@ -38,6 +39,10 @@ function NavLink({ item }: { item: NavItem }) {
 }
 
 export default function Sidebar() {
+  // Visible on every page, so this is where a dead feed should announce
+  // itself. The CSS for it already existed; the markup never did.
+  const { connected, nodes } = useFeed();
+
   return (
     <aside className={styles.sidebar}>
       <div className={styles.brand}>
@@ -71,7 +76,23 @@ export default function Sidebar() {
         </div>
       </nav>
 
-
+      <div className={styles.footer}>
+        <div className={styles.connection}>
+          <span
+            className={styles.connectionDot}
+            data-connected={connected}
+            aria-hidden="true"
+          />
+          <span role="status">
+            <span className={styles.connectionLabel}>Control plane</span>
+            <span className={styles.connectionStatus}>
+              {connected
+                ? `${nodes.length} node${nodes.length === 1 ? "" : "s"}`
+                : "reconnecting…"}
+            </span>
+          </span>
+        </div>
+      </div>
     </aside>
   );
 }

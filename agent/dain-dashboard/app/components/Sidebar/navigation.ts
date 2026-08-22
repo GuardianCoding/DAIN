@@ -1,9 +1,7 @@
 import {
-  MessageSquare,
   Cpu,
   Activity,
   Settings,
-  Terminal,
   House,
   MessageSquarePlus,
 } from "lucide-react";
