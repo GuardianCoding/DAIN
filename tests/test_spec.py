@@ -159,10 +159,23 @@ class TestProvenance:
         derived capacity figure should go on a slide."""
         assert set(unverified_models()) == set(KV_GEOMETRY)
 
-    def test_models_without_geometry_are_the_ones_with_no_layer_count(self):
-        by_id = {spec.model_id: spec for spec in load_ladder()}
-        missing_geometry = set(known_models()) - set(KV_GEOMETRY)
+    def test_every_rung_now_declares_a_layer_count(self):
+        # Was 0 for the three Qwen3.6-35B-A3B rungs until their block_count
+        # was read. Kept as a test so a newly added model cannot skip it.
+        for spec in load_ladder():
+            assert spec.total_layers > 0, spec.model_id
 
-        assert missing_geometry == {"working", "mtp", "working_spare"}
+    def test_a_model_without_geometry_cannot_be_planned(self):
+        """The invariant that matters, decoupled from the layer count.
+
+        Knowing total_layers is necessary but not sufficient: sizing the cache
+        also needs kv_heads and head_dim. A rung with layers but no geometry
+        must refuse rather than fall back to some default, because a wrong
+        cache size stays invisible until the machine OOMs.
+        """
+        missing_geometry = sorted(set(known_models()) - set(KV_GEOMETRY))
+
+        assert missing_geometry == ["mtp", "working", "working_spare"]
         for model_id in missing_geometry:
-            assert by_id[model_id].total_layers == 0
+            with pytest.raises(ModelSpecUnavailable, match="geometry"):
+                scheduler_spec(model_id, 8192, 1)
