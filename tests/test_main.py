@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from ctl.main import app
+from ctl.main import app, seed_registry
 from ctl.mock import MOCK_POOL_SECRET, reset_mock_state
 
 client = TestClient(app)
@@ -10,8 +10,12 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def reset_state():
     reset_mock_state()
+    seed_registry()
+
     yield
+
     reset_mock_state()
+    seed_registry()
 
 
 def joined_node_payload() -> dict:
@@ -160,22 +164,100 @@ def test_race_models_serial_and_fanout():
 def test_feed_exposes_all_four_frame_types():
     created_job = client.post(
         "/api/jobs",
-        json={"kind": "search", "payload": {"query": "cluster"}, "fanout": 2},
+        json={
+            "kind": "search",
+            "payload": {"query": "cluster"},
+            "fanout": 2,
+        },
     ).json()
 
     with client.websocket_connect("/feed") as websocket:
         topology = websocket.receive_json()
-        metrics = websocket.receive_json()
-        event = websocket.receive_json()
-        flow = websocket.receive_json()
+        frames_by_type: dict[str, dict] = {}
 
-        assert topology["type"] == "topology"
-        assert len(topology["nodes"]) == 4
-        assert metrics["type"] == "metrics"
-        assert len(metrics["nodes"]) == 4
-        assert event["type"] == "event"
-        assert event["message"]
-        assert flow["type"] == "flow"
-        assert flow["source"] == "ctl"
-        assert flow["job_id"] == created_job["id"]
-        assert flow["target"] in created_job["assigned_nodes"]
+        # Several registry events may arrive before the flow frame.
+        for _ in range(10):
+            frame = websocket.receive_json()
+            frame_type = frame.get("type")
+
+            if frame_type in {"metrics", "event", "flow"}:
+                frames_by_type.setdefault(frame_type, frame)
+
+            if {"metrics", "event", "flow"} <= frames_by_type.keys():
+                break
+        else:
+            pytest.fail(
+                f"Feed did not provide all frame types: {frames_by_type.keys()}"
+            )
+
+    metrics = frames_by_type["metrics"]
+    event = frames_by_type["event"]
+    flow = frames_by_type["flow"]
+
+    assert topology["type"] == "topology"
+    assert len(topology["nodes"]) == 4
+
+    assert len(metrics["nodes"]) == 4
+
+    assert event["message"]
+
+    assert flow["source"] == "ctl"
+    assert flow["job_id"] == created_job["id"]
+    assert flow["target"] in created_job["assigned_nodes"]
+
+
+def test_heartbeat_updates_joined_node():
+    client.post("/api/nodes/join", json=joined_node_payload())
+
+    response = client.post(
+        "/api/nodes/guest-01/heartbeat",
+        json={
+            "metrics": {
+                "node_id": "guest-01",
+                "timestamp": 1000.0,
+                "cpu_percent": 25.0,
+                "ram_free_mb": 11000,
+                "gpu_percent": None,
+                "vram_free_mb": None,
+                "jobs_running": 1,
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "node_id": "guest-01",
+        "state": "idle",
+        "missed_heartbeats": 0,
+    }
+
+
+def test_heartbeat_rejects_unknown_node():
+    response = client.post(
+        "/api/nodes/missing/heartbeat",
+        json={},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "node not found"
+
+
+def test_heartbeat_rejects_mismatched_metrics():
+    client.post("/api/nodes/join", json=joined_node_payload())
+
+    response = client.post(
+        "/api/nodes/guest-01/heartbeat",
+        json={
+            "metrics": {
+                "node_id": "office-01",
+                "timestamp": 1000.0,
+                "cpu_percent": 25.0,
+                "ram_free_mb": 6000,
+                "gpu_percent": None,
+                "vram_free_mb": None,
+                "jobs_running": 0,
+            }
+        },
+    )
+
+    assert response.status_code == 422
