@@ -9,8 +9,10 @@ demo, the control plane likely calls plan() in-process and passes these
 same two lists directly, skipping the network hop entirely. Keep this
 fetcher decoupled from plan() itself for exactly that reason.
 """
+
 import httpx
-from contracts import NodeProfile, NodeMetrics
+
+from contracts import NodeMetrics, NodeProfile
 
 
 class ClusterStateFetcher:
@@ -54,7 +56,7 @@ class ClusterStateFetcher:
             ram_free_mb=data["ram_free_mb"],
             gpu=data.get("gpu"),
             vram_total_mb=data["vram_total_mb"],
-            backend=data["backend"],          # "cuda" | "cpu" | "vulkan" | "metal"
+            backend=data["backend"],  # "cuda" | "cpu" | "vulkan" | "metal"
             mem_bandwidth_gbs=data["mem_bandwidth_gbs"],
             tg_tok_s=data["tg_tok_s"],
             pp_tok_s=data["pp_tok_s"],

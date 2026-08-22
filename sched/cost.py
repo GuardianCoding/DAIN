@@ -13,7 +13,8 @@ model_spec shape assumed here — CONFIRM WITH YOUSSEF, this is his territory
     "kv_mb_per_layer": float,   # KV cache size per layer at the demo's context length
 }
 """
-from contracts import NodeProfile, NodeMetrics, Assignment
+
+from contracts import Assignment, NodeMetrics, NodeProfile
 
 UNIFIED_MEMORY_BACKENDS = {"metal"}
 

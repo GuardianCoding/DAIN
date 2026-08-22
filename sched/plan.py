@@ -7,15 +7,16 @@ Pure function. No I/O, no state held between calls. Abdallah's control
 plane calls plan(profiles, metrics, model_spec) directly — profiles from
 REGISTRY.list_profiles(), metrics from REGISTRY.latest_metrics().
 """
-from contracts import NodeProfile, NodeMetrics, Assignment
-from cost import (
-    usable_mem_mb,
-    layer_weight_mb,
-    node_footprint_mb,
-    overflow_mb,
+
+from sched.cost import (
     fits,
+    layer_weight_mb,
+    overflow_mb,
     predict_tok_s,
+    usable_mem_mb,
 )
+
+from contracts import Assignment, NodeMetrics, NodeProfile
 
 """
 model_spec — the per-model data contract that sched.plan.plan() and
@@ -116,6 +117,7 @@ MINIMAL EXAMPLE (values are illustrative, not measured):
     }
 """
 
+
 def plan(
     profiles: list[NodeProfile],
     metrics: list[NodeMetrics],
@@ -126,7 +128,11 @@ def plan(
 
     metrics_by_id = {m.node_id: m for m in metrics}
     # A node with a profile but no heartbeat yet can't be trusted for placement.
-    usable_profiles = [p for p in profiles if p.id in metrics_by_id]
+    usable_profiles = [
+        profile
+        for profile in profiles
+        if profile.id in metrics_by_id and profile.state != "offline"
+    ]
     if not usable_profiles:
         raise RuntimeError("no nodes have reported metrics yet")
 
@@ -177,8 +183,8 @@ def _assign_by_speed(profiles: list[NodeProfile], model_spec: dict) -> Assignmen
         layers=layers,
         n_cpu_moe={p.id: 0 for p in profiles},  # Youssef's tuning fills this in later
         tensor_split=[round(p.tg_tok_s / total_speed, 4) for p in ordered],
-        predicted_tok_s=0.0,   # filled in by plan() after repair
-        rationale="",          # filled in by plan() after repair
+        predicted_tok_s=0.0,  # filled in by plan() after repair
+        rationale="",  # filled in by plan() after repair
     )
 
 
@@ -195,9 +201,22 @@ def _repair(
     metrics_by_id = {m.node_id: m for m in metrics}
     layers = dict(assignment.layers)
 
-    max_iterations = model_spec["total_layers"] * len(profiles)  # hard stop, avoid infinite loop
+    max_iterations = model_spec["total_layers"] * len(
+        profiles
+    )  # hard stop, avoid infinite loop
     for _ in range(max_iterations):
-        overflowing = [...]
+        overflowing = [
+            node_id
+            for node_id in layers
+            if overflow_mb(
+                assignment,
+                profiles,
+                metrics,
+                model_spec,
+                node_id,
+            )
+            > 0
+        ]
         if not overflowing:
             break
 
@@ -207,7 +226,9 @@ def _repair(
         if node_count <= 1:
             continue
 
-        donor_id = _find_slack_donor(layers, profiles_by_id, metrics_by_id, model_spec, exclude=node_id)
+        donor_id = _find_slack_donor(
+            layers, profiles_by_id, metrics_by_id, model_spec, exclude=node_id
+        )
         if donor_id is None:
             break
 
@@ -229,9 +250,16 @@ def _repair(
             predicted_tok_s=assignment.predicted_tok_s,
             rationale=assignment.rationale,
         )
-        layers = dict(assignment.layers)
-
-    return assignment
+    layers = dict(assignment.layers)
+    final_layers = _renumber_contiguous(layers, profiles)
+    return Assignment(
+        model_id=assignment.model_id,
+        layers=final_layers,
+        n_cpu_moe=assignment.n_cpu_moe,
+        tensor_split=_tensor_split_from_layers(final_layers),
+        predicted_tok_s=assignment.predicted_tok_s,
+        rationale=assignment.rationale,
+    )
 
 
 def _find_slack_donor(
@@ -248,9 +276,11 @@ def _find_slack_donor(
             continue
         profile = profiles_by_id[node_id]
         metric = metrics_by_id[node_id]
-        current_mb = (layers[node_id][1] - layers[node_id][0] + 1) * layer_weight_mb(model_spec)
+
+        per_layer_mb = layer_weight_mb(model_spec) + model_spec["kv_mb_per_layer"]
+        current_mb = (layers[node_id][1] - layers[node_id][0] + 1) * per_layer_mb
         slack_mb = usable_mem_mb(profile, metric) - current_mb
-        if slack_mb > layer_weight_mb(model_spec):  # room for at least one more layer
+        if slack_mb >= per_layer_mb:
             candidates.append((profile.tg_tok_s, node_id))
 
     if not candidates:
@@ -276,9 +306,27 @@ def _renumber_contiguous(
     cursor = 0
     for node_id in ordered_ids:
         count = max(0, counts[node_id])
-        result[node_id] = (cursor, cursor + count - 1) if count > 0 else (cursor, cursor - 1)
+        result[node_id] = (
+            (cursor, cursor + count - 1) if count > 0 else (cursor, cursor - 1)
+        )
         cursor += count
     return result
+
+
+def _tensor_split_from_layers(
+    layers: dict[str, tuple[int, int]],
+) -> list[float]:
+    """Return layer shares in the planner's sorted node order."""
+    ordered_ids = sorted(layers)
+    counts = [
+        max(0, layers[node_id][1] - layers[node_id][0] + 1) for node_id in ordered_ids
+    ]
+
+    total = sum(counts)
+    if total == 0:
+        return [0.0 for _ in counts]
+
+    return [round(count / total, 4) for count in counts]
 
 
 def _explain(
