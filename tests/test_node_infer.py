@@ -7,6 +7,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from contracts import NodeProfile
 from node import dain_node
 from node.auth import sign_job_request
 from node.infer import (
@@ -15,8 +16,6 @@ from node.infer import (
     LocalInference,
     _normalise,
 )
-
-from contracts import NodeProfile
 
 POOL_SECRET = "test-pool-secret"
 NODE_ID = "fedora-test"

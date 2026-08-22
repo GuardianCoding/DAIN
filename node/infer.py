@@ -285,10 +285,13 @@ class LocalInference:
 
         max_tokens = payload.get("max_tokens", DEFAULT_MAX_TOKENS)
         temperature = payload.get("temperature", DEFAULT_TEMPERATURE)
+        # ValueError, not TypeError (ruff TRY004): the route maps ValueError ->
+        # 422 and InferenceUnavailableError -> 503, and that split decides
+        # whether the queue retries the shard on another node.
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
-            raise ValueError("payload.max_tokens must be an integer")
+            raise ValueError("payload.max_tokens must be an integer")  # noqa: TRY004
         if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
-            raise ValueError("payload.temperature must be a number")
+            raise ValueError("payload.temperature must be a number")  # noqa: TRY004
 
         await self.await_ready()
         client = self._ensure_client()

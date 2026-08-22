@@ -7,6 +7,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from contracts import NodeProfile
 from node import bench as bench_module
 from node import dain_node
 from node.auth import sign_job_request
@@ -17,8 +18,6 @@ from node.bench import (
     measure,
     parse_bench_json,
 )
-
-from contracts import NodeProfile
 
 POOL_SECRET = "test-pool-secret"
 NODE_ID = "office-01"

@@ -243,7 +243,10 @@ class LocalBench:
             ("gen_tokens", gen_tokens, MAX_TOKENS),
         ):
             if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"payload.{name} must be an integer")
+                # ValueError, not TypeError (ruff TRY004): the route maps
+                # ValueError -> 422 and BenchUnavailableError -> 503, and that
+                # split decides whether the queue retries on another node.
+                raise ValueError(f"payload.{name} must be an integer")  # noqa: TRY004
             if not 1 <= value <= cap:
                 raise ValueError(f"payload.{name} must be between 1 and {cap}")
 
