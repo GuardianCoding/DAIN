@@ -506,8 +506,3 @@ class TestRealClusterDecisions:
         # If this fails, fan-out drops from five nodes to four.
         smallest = min(budgets, key=lambda b: b.total_usable_mib)
         assert by_role(specs, "replica").weights_mib < smallest.total_usable_mib
-
-    def test_nothing_is_verified_yet(self, budgets):
-        # Guard against this suite quietly becoming "proof". Delete this test
-        # once the inventory has run and verified = true everywhere.
-        assert not any(b.verified for b in budgets)

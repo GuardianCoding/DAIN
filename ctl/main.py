@@ -4,20 +4,28 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response, WebSocket
+from fastapi import FastAPI, Header, HTTPException, Query, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketDisconnect
 
 from contracts import NodeMetrics, NodeProfile
+from ctl.auth import AuthenticationError, JoinAuthManager
 from ctl.mock import MOCK_POOL_SECRET, MOCK_STATE
 from ctl.queue import JobQueue, NodeUnavailableError
 from ctl.registry import NodeRegistry
+from ctl.telemetry import TelemetryFanIn
+from node.discovery import advertise_control_plane
 
 
 class JoinRequest(BaseModel):
     profile: NodeProfile
-    pool_secret: str
+    nonce: str = Field(min_length=1)
+    signature: str = Field(min_length=64, max_length=64)
+
+
+class JoinChallengeRequest(BaseModel):
+    node_id: str = Field(min_length=1)
 
 
 class JobRequest(BaseModel):
@@ -46,11 +54,14 @@ REGISTRY = NodeRegistry(
     on_replan=request_replan,
 )
 
-JOB_QUEUE = JobQueue(REGISTRY)
+JOB_QUEUE = JobQueue(REGISTRY, pool_secret=MOCK_POOL_SECRET)
+TELEMETRY = TelemetryFanIn(REGISTRY)
+AUTH = JoinAuthManager(MOCK_POOL_SECRET)
 
 
 def seed_registry() -> None:
     REGISTRY.reset()
+    AUTH.reset()
 
     metrics_by_node = {metric.node_id: metric for metric in MOCK_STATE.metrics()}
 
@@ -66,6 +77,8 @@ def seed_registry() -> None:
             metrics_by_node[profile_copy.id],
         )
 
+    TELEMETRY.reset(REGISTRY.latest_metrics())
+
 
 seed_registry()
 
@@ -76,9 +89,20 @@ async def monitor_heartbeats() -> None:
         REGISTRY.sweep()
 
 
+async def _wait_for_next_feed_cycle() -> None:
+    await asyncio.sleep(TELEMETRY.interval_s)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     monitor_task = asyncio.create_task(monitor_heartbeats())
+    await TELEMETRY.start()
+    advertisement = None
+
+    try:
+        advertisement = await asyncio.to_thread(advertise_control_plane)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"mDNS control-plane advertisement unavailable: {exc}")
 
     try:
         yield
@@ -90,7 +114,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except asyncio.CancelledError:
             pass
 
+        await TELEMETRY.close()
         await JOB_QUEUE.close()
+        if advertisement is not None:
+            await asyncio.to_thread(advertisement.close)
 
 
 app = FastAPI(
@@ -125,11 +152,32 @@ def get_nodes() -> list[dict[str, Any]]:
 
 @app.post("/api/nodes/join", status_code=201)
 def join_node(request: JoinRequest) -> dict[str, Any]:
-    if request.pool_secret != MOCK_POOL_SECRET:
-        raise HTTPException(status_code=403, detail="invalid pool secret")
+    try:
+        token = AUTH.complete_join(
+            asdict(request.profile),
+            request.nonce,
+            request.signature,
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     profile = REGISTRY.register(request.profile)
-    return asdict(profile)
+    return {
+        **asdict(profile),
+        "access_token": token.access_token,
+        "token_type": "bearer",
+        "expires_at": token.expires_at,
+    }
+
+
+@app.post("/api/nodes/join/challenge")
+def create_join_challenge(request: JoinChallengeRequest) -> dict[str, Any]:
+    challenge = AUTH.issue_challenge(request.node_id)
+    return {
+        "node_id": challenge.node_id,
+        "nonce": challenge.nonce,
+        "expires_at": challenge.expires_at,
+    }
 
 
 @app.delete("/api/nodes/{node_id}", status_code=204)
@@ -137,6 +185,8 @@ def delete_node(node_id: str) -> Response:
     if not REGISTRY.remove(node_id):
         raise HTTPException(status_code=404, detail="node not found")
 
+    TELEMETRY.remove(node_id)
+    AUTH.revoke(node_id)
     return Response(status_code=204)
 
 
@@ -183,10 +233,7 @@ def get_job(job_id: str) -> dict[str, Any]:
 
 @app.get("/api/metrics")
 def get_metrics() -> dict[str, Any]:
-    return {
-        "type": "metrics",
-        "nodes": [asdict(metric) for metric in REGISTRY.latest_metrics()],
-    }
+    return TELEMETRY.frame()
 
 
 @app.post("/api/race")
@@ -197,18 +244,19 @@ def run_race(request: RaceRequest) -> dict[str, Any]:
 @app.websocket("/feed")
 async def send_feed(websocket: WebSocket) -> None:
     await websocket.accept()
-    await websocket.send_json(
-        {
-            "type": "topology",
-            "nodes": get_nodes(),
-        }
-    )
-
+    topology = get_nodes()
+    await websocket.send_json({"type": "topology", "nodes": topology})
     last_registry_sequence = 0
     last_queue_sequence = 0
+    last_topology = topology
 
     try:
         while True:
+            topology = get_nodes()
+            if topology != last_topology:
+                await websocket.send_json({"type": "topology", "nodes": topology})
+                last_topology = topology
+
             await websocket.send_json(get_metrics())
 
             registry_events = REGISTRY.events_after(last_registry_sequence)
@@ -251,14 +299,26 @@ async def send_feed(websocket: WebSocket) -> None:
 
                 last_queue_sequence = event.sequence
 
-            await asyncio.sleep(1)
+            await _wait_for_next_feed_cycle()
 
     except WebSocketDisconnect:
         return
 
 
 @app.post("/api/nodes/{node_id}/heartbeat")
-def heartbeat(node_id: str, request: HeartbeatRequest) -> dict[str, Any]:
+def heartbeat(
+    node_id: str,
+    request: HeartbeatRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    token = _bearer_token(authorization)
+    if token is None or not AUTH.validate_token(node_id, token):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid or expired bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         record = REGISTRY.heartbeat(node_id, request.metrics)
     except KeyError as exc:
@@ -266,8 +326,20 @@ def heartbeat(node_id: str, request: HeartbeatRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    if request.metrics is not None:
+        TELEMETRY.record(request.metrics)
+
     return {
         "node_id": record.profile.id,
         "state": record.profile.state,
         "missed_heartbeats": record.missed_heartbeats,
     }
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    if authorization is None:
+        return None
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.casefold() != "bearer" or not token:
+        return None
+    return token

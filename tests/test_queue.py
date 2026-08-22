@@ -7,6 +7,9 @@ import pytest
 from contracts import NodeMetrics, NodeProfile
 from ctl.queue import JobQueue
 from ctl.registry import NodeRegistry
+from node.auth import verify_job_request
+
+POOL_SECRET = "test-pool-secret"
 
 
 def make_registry() -> NodeRegistry:
@@ -57,7 +60,7 @@ async def test_submit_returns_before_work_finishes():
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
     job = await queue.submit(
         "search",
         {"tasks": [{"query": "alpha"}]},
@@ -81,6 +84,8 @@ async def test_submit_returns_before_work_finishes():
             }
         ],
         "errors": [],
+        "hits": [],
+        "nodes_searched": ["node-01"],
     }
 
     await queue.close()
@@ -154,7 +159,7 @@ async def test_fanout_splits_tasks_across_least_busy_nodes_concurrently():
         return httpx.Response(200, json={"ok": True, "result": request.url.host})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
 
     job = await queue.submit(
         "search",
@@ -189,7 +194,7 @@ async def test_pinned_job_uses_only_requested_node():
         return httpx.Response(200, json={"ok": True, "result": "done"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
     job = await queue.submit(
         "exec",
         {"tasks": ["a", "b", "c", "d"]},
@@ -223,7 +228,7 @@ async def test_offline_nodes_are_not_selected():
         return httpx.Response(200, json={"ok": True, "result": "done"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
     job = await queue.submit("search", {"query": "alpha"}, fanout=1)
     await queue.wait(job.id, timeout=1.0)
 
@@ -250,7 +255,12 @@ async def test_per_node_semaphore_prevents_overlapping_requests():
             active -= 1
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client, per_node_limit=1)
+    queue = JobQueue(
+        registry,
+        pool_secret=POOL_SECRET,
+        client=client,
+        per_node_limit=1,
+    )
 
     first = await queue.submit("exec", {"command": "first"}, node_id="node-01")
     second = await queue.submit("exec", {"command": "second"}, node_id="node-01")
@@ -281,7 +291,7 @@ async def test_failed_node_is_retried_once_then_shard_is_reassigned():
         return httpx.Response(200, json={"ok": True, "result": "recovered"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
     job = await queue.submit("search", {"query": "alpha"}, fanout=1)
     completed = await queue.wait(job.id, timeout=1.0)
 
@@ -311,7 +321,7 @@ async def test_job_fails_when_no_replacement_node_is_available():
         return httpx.Response(503, json={"error": "node unavailable"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
     job = await queue.submit("search", {"query": "alpha"}, fanout=1)
     completed = await queue.wait(job.id, timeout=1.0)
 
@@ -326,6 +336,147 @@ async def test_job_fails_when_no_replacement_node_is_available():
 
 
 @pytest.mark.asyncio
+async def test_client_rejection_is_not_retried_or_reassigned():
+    registry = make_registry()
+    add_node(registry, "node-02")
+    requested_hosts: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_hosts.append(request.url.host)
+        return httpx.Response(409, json={"detail": "index is not ready"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
+    job = await queue.submit("search", {"query": "alpha"}, fanout=1)
+    completed = await queue.wait(job.id, timeout=1.0)
+
+    assert completed.status == "failed"
+    assert requested_hosts == ["node-01.local"]
+    assert not any(event.event == "reassigned" for event in queue.events)
+    assert "index is not ready" in queue.events[-1].message
+
+    await queue.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_dispatches_a_signed_request_with_a_long_index_timeout():
+    registry = make_registry()
+    received: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        received.update(json.loads(request.content))
+        assert request.extensions["timeout"]["read"] == 30.0
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
+    job = await queue.submit("index", {}, fanout=1)
+    await queue.wait(job.id, timeout=1.0)
+
+    assert verify_job_request(
+        POOL_SECRET,
+        job_id=received["job_id"],
+        kind=received["kind"],
+        payload=received["payload"],
+        shard_index=received["shard_index"],
+        shard_count=received["shard_count"],
+        issued_at=received["issued_at"],
+        signature=received["signature"],
+    )
+
+    await queue.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_search_merges_ranked_node_qualified_hits_from_three_nodes():
+    registry = make_registry()
+    add_node(registry, "node-02")
+    add_node(registry, "node-03")
+    scores = {
+        "node-01.local": 0.7,
+        "node-02.local": 0.9,
+        "node-03.local": 0.8,
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["shard_count"] == 3
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {
+                    "embedding_model": "test/semantic-small",
+                    "hits": [
+                        {
+                            "path": "notes.md",
+                            "score": scores[request.url.host],
+                            "snippet": request.url.host,
+                        }
+                    ],
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
+    job = await queue.submit(
+        "search",
+        {"query": "telemetry", "limit": 3},
+        fanout=3,
+    )
+    completed = await queue.wait(job.id, timeout=1.0)
+
+    assert completed.status == "done"
+    assert completed.result is not None
+    assert completed.result["nodes_searched"] == ["node-01", "node-02", "node-03"]
+    assert [hit["source"] for hit in completed.result["hits"]] == [
+        "node-02:notes.md",
+        "node-03:notes.md",
+        "node-01:notes.md",
+    ]
+    assert [hit["score"] for hit in completed.result["hits"]] == [0.9, 0.8, 0.7]
+    assert completed.result["embedding_model"] == "test/semantic-small"
+
+    await queue.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_search_refuses_to_merge_scores_from_different_embedding_models():
+    registry = make_registry()
+    add_node(registry, "node-02")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model_id = "model/a" if request.url.host == "node-01.local" else "model/b"
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {
+                    "embedding_model": model_id,
+                    "hits": [{"path": "notes.md", "score": 0.8}],
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
+    job = await queue.submit("search", {"query": "telemetry"}, fanout=2)
+
+    completed = await queue.wait(job.id, timeout=1.0)
+
+    assert completed.status == "failed"
+    assert completed.result is not None
+    assert "different embedding models" in completed.result["errors"][0]["error"]
+
+    await queue.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_queue_events_have_increasing_sequences():
     registry = make_registry()
 
@@ -333,7 +484,7 @@ async def test_queue_events_have_increasing_sequences():
         return httpx.Response(200, json={"ok": True, "result": "done"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
     job = await queue.submit("search", {"query": "alpha"})
     await queue.wait(job.id, timeout=1.0)
 
@@ -362,7 +513,7 @@ async def test_close_cancels_running_jobs_and_rejects_new_jobs():
         return httpx.Response(200, json={"ok": True, "result": "done"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client)
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
     job = await queue.submit("search", {"query": "alpha"})
     await asyncio.wait_for(request_started.wait(), timeout=1.0)
 
@@ -404,7 +555,12 @@ async def test_twenty_fanout_jobs_keep_four_nodes_busy():
             active -= 1
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    queue = JobQueue(registry, client=client, per_node_limit=1)
+    queue = JobQueue(
+        registry,
+        pool_secret=POOL_SECRET,
+        client=client,
+        per_node_limit=1,
+    )
     jobs = [
         await queue.submit(
             "search",

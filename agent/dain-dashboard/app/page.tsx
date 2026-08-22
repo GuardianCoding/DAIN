@@ -11,5 +11,5 @@ export default function Home() {
       <div className={styles.rule} />
       <p className={styles.tag}>Shared pool of computing resources, one agentic AI. Built for the 2026 UQCS Hackathon.</p>
     </main>
-  );
+  ); 
 }

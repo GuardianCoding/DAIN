@@ -15,6 +15,18 @@ class FakeClock:
         self.now += seconds
 
 
+class CountingLock:
+    def __init__(self) -> None:
+        self.entries = 0
+
+    def __enter__(self):
+        self.entries += 1
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+        return None
+
+
 def make_profile(node_id: str = "gpu-01") -> NodeProfile:
     return NodeProfile(
         id=node_id,
@@ -293,3 +305,22 @@ def test_reset_clears_registry_state():
     assert registry.latest_metrics() == []
     assert registry.events_after(0) == []
     assert registry.next_sequence == 1
+
+
+def test_public_registry_accessors_take_the_lock():
+    clock = FakeClock()
+    registry = make_registry(clock)
+    registry.register(make_profile())
+    registry.heartbeat("gpu-01", make_metrics())
+    lock = CountingLock()
+    registry.lock = lock
+
+    registry.list_profiles()
+    registry.get_record("gpu-01")
+    registry.remove("missing")
+    registry.events_after(0)
+    registry.latest_metrics()
+    registry.reset()
+
+    assert lock.entries == 6
+    assert registry.lock is lock

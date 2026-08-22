@@ -29,17 +29,18 @@ export const navigation: NavItem[] = [
     description: "View connected nodes",
   },
   {
-    label: "Prompts",
-    href: "/prompts",
-    icon: Activity,
-    description: "Monitor status of running prompts",
-  },
-  {
-    label: "Create Prompt",
-    href: "/new-prompt",
+    label: "Create Job",
+    href: "/create-job",
     icon: MessageSquarePlus,
     description: "Send a new prompt to the cluster",
   },
+  {
+    label: "Jobs",
+    href: "/jobs",
+    icon: Activity,
+    description: "Monitor status of running jobs",
+  },
+  
 ];
 
 export const secondaryNavigation: NavItem[] = [
