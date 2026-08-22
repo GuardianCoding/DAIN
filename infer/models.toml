@@ -1,0 +1,171 @@
+# infer/models.toml — the DAIN model ladder.
+#
+# Owner: Youssef (L2, inference fabric). Consumed by scripts/fetch-models.sh,
+# infer/models.py and infer/launch.py.
+#
+# size_gb is the DOWNLOAD size in decimal GB, as Hugging Face reports it.
+# Memory maths uses GiB; infer/memory.py does that conversion. Do not mix them.
+#
+# `priority` is download order, chosen so that if the venue link dies after
+# item 3 the demo still exists. The headline model is deliberately LAST: it is
+# the bonus, never the plan.
+
+[meta]
+# Only gpu-01 needs the full model files. The llama.cpp RPC head streams each
+# worker its slice at load time, and `rpc-server -c` caches that slice locally.
+# So budget ~110 GB on gpu-01 and a few GB per worker, not 110 GB x 5.
+host_node           = "gpu-01"
+host_free_gb_needed = 110
+quant_default       = "Q4_K_M"   # +0.05 ppl vs F16, HumanEval parity. Not the bottleneck.
+
+# ---------------------------------------------------------------------------
+# 1. Calibration — must run on every node in seconds. Sean's SCH-1 probe.
+# ---------------------------------------------------------------------------
+[models.calibration]
+role            = "calibration"
+repo            = "unsloth/Qwen3-0.6B-GGUF"
+include         = "*Q4_K_M*.gguf"
+size_gb         = 0.4
+params_total_b  = 0.6
+params_active_b = 0.6
+priority        = 1
+claim           = "Not demoed. This is the yardstick every node is measured with."
+notes = """
+Blocks SCH-1, SCH-2 and therefore the entire scheduler critical path.
+Download this FIRST — it is 400 MB and it unblocks another person.
+"""
+
+# ---------------------------------------------------------------------------
+# 2. Replica — the fan-out and showdown model. Must fit the SMALLEST node.
+# ---------------------------------------------------------------------------
+[models.replica]
+role            = "replica"
+repo            = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+include         = "*Q4_K_M*.gguf"
+size_gb         = 2.5
+params_total_b  = 4.0
+params_active_b = 4.0
+priority        = 2
+claim           = "Fan-out: one full copy per node, N independent subtasks at once."
+notes = """
+Sized against nuc-01's ~3.2 GiB usable under Linux. Under Windows 11 the NUC had
+~2.2 GiB and could NOT hold this — moving it to Linux is what puts the fifth
+node into the fan-out demo at all.
+Doubles as the 'fast and wrong' side of Liam's showdown (AG-2): ~4B is below the
+~7B floor where tool calling starts working, which is precisely the point.
+"""
+
+# ---------------------------------------------------------------------------
+# 3. Working — the demo workhorse. Scheduler A/B, agent tool use, the race.
+# ---------------------------------------------------------------------------
+[models.working]
+role            = "working"
+repo            = "unsloth/Qwen3.6-35B-A3B-GGUF"
+include         = "*Q4_K_M*.gguf"
+size_gb         = 20.9
+params_total_b  = 35.0
+params_active_b = 3.0
+priority        = 3
+claim           = "Most of the demo runs on this. 3B active is why it is usable at all."
+notes = """
+35B of capacity at 3B of compute per token — roughly a 10x decode advantage over
+any dense model of the same file size on RAM-bound nodes.
+Released 2026-04-16, Apache 2.0, 256K-class context.
+"""
+
+# ---------------------------------------------------------------------------
+# 4. Castoff capacity — the unarguable capacity claim. Zero asterisks.
+# ---------------------------------------------------------------------------
+[models.castoff]
+role            = "castoff_capacity"
+repo            = "ggml-org/gpt-oss-20b-GGUF"
+include         = "*.gguf"
+size_gb         = 11.5
+params_total_b  = 21.0
+params_active_b = 3.6
+priority        = 4
+claim = """
+21 billion parameters running on two office PCs and a NUC with no GPU between
+them. 10.7 GiB of weights against a 7.0 GiB largest node: it loads on the three
+together and fails on each one alone. Show both.
+"""
+notes = """
+This is the honest capacity claim and it costs 11.5 GB. It excludes both gaming
+PCs by design, which is what makes it unarguable AND on-message — the pitch is
+about idle machines in a building, and these are exactly those machines.
+Run the same command on each node alone first, on camera, and let it fail.
+"""
+
+# ---------------------------------------------------------------------------
+# 5. Headline — the big number. Bonus, not plan. Downloads last, overnight.
+# ---------------------------------------------------------------------------
+[models.headline]
+role            = "headline"
+repo            = "ggml-org/gpt-oss-120b-GGUF"
+include         = "*.gguf"
+size_gb         = 63.4
+params_total_b  = 117.0
+params_active_b = 5.1
+priority        = 5
+claim = """
+117 billion parameters on five machines in this room. Weights alone (59.0 GiB)
+DO fit gpu-01, so do not claim otherwise. The claim that survives scrutiny is
+weights + concurrency: four agent sessions at 128k context each need ~18 GiB of
+KV on top, and 59 + 3 + 18 = 80 GiB does not fit gpu-01's ~77 GiB. It fits the
+pool. Verify with infer/memory.py before saying it on stage.
+"""
+notes = """
+MXFP4 native — no quantisation-over-RPC risk, unlike a 2-bit repack.
+5.1B active keeps it demo-usable (~17-20 tok/s pooled) where a 12B-active or
+22B-active model of similar file size lands at 4-6 tok/s.
+63.4 GB is the single largest download. Start it in the background and let it
+run overnight; everything above it must be complete first.
+"""
+
+# ---------------------------------------------------------------------------
+# 6. Optional extras — only if the link and the clock allow.
+# ---------------------------------------------------------------------------
+[models.mtp]
+role            = "speculative"
+repo            = "ggml-org/Qwen3.6-35B-A3B-MTP-GGUF"
+include         = "*Q4_K_M*.gguf"
+size_gb         = 21.0
+params_total_b  = 35.0
+params_active_b = 3.0
+priority        = 6
+claim           = "INF-5. Self-speculative decoding, no separate draft model."
+notes = """
+Flags are the 2026 names: --spec-type draft-mtp --spec-draft-n-max 3.
+Published single-GPU results on A3B are unconvincing — the baseline is already
+cheap, so there is little target cost to save. The reason it may still pay off
+HERE is different and worth the timebox: on a pipeline-parallel cluster,
+verifying N drafted tokens is ONE pass through the pipeline, so it amortises the
+per-token network hop across N tokens. That is the only lever that attacks this
+cluster's actual cost structure. Timebox 90 minutes, as INF-5 says.
+"""
+
+[models.working_spare]
+role            = "spare_quant"
+repo            = "unsloth/Qwen3.6-35B-A3B-GGUF"
+include         = "*Q5_K_M*.gguf"
+size_gb         = 25.0
+params_total_b  = 35.0
+params_active_b = 3.0
+priority        = 8
+claim           = "Not demoed. Insurance against the quantisation-over-RPC failure mode."
+notes = """
+Some Q4_K/Q5_K GGUFs hit assertion errors over RPC on awkward tensor shapes.
+A different quant of the SAME model turns a dead evening into a two-minute fix.
+Only worth carrying if the working model is what the demo depends on — which it
+is. Fetch it while you are on a fast link; you will never get it at the venue.
+"""
+
+[models.embed]
+role            = "embedding"
+repo            = "Qwen/Qwen3-Embedding-0.6B-GGUF"
+include         = "*Q8_0*.gguf"
+size_gb         = 0.6
+params_total_b  = 0.6
+params_active_b = 0.6
+priority        = 7
+claim           = "Lachlan's NODE-5 file index. Embedding is the one genuinely parallel workload."

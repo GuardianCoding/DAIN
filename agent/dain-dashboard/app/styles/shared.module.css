@@ -1,0 +1,49 @@
+.kicker {
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 600;
+}
+
+.gradientText {
+  background: linear-gradient(135deg, var(--ink-1) 0%, var(--aqua) 55%, var(--blue) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.rule {
+  width: 64px;
+  height: 2px;
+  background: var(--rule);
+}
+
+.pulseDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rule);
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { background: var(--rule); }
+  50% { background: var(--aqua); }
+}
+
+.card {
+  background: #151515;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.pagebutton {
+  background: linear-gradient(135deg, var(--ink-1) 0%, var(--aqua) 55%, var(--blue) 100%);
+  width: 160px;
+  height: 50px;
+  font-size: 25;
+  text-decoration: none;
+  color: white;
+}
