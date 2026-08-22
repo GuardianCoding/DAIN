@@ -3,6 +3,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
+from sched.plan import plan as sched_plan
 from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response, WebSocket
@@ -16,7 +17,13 @@ from ctl.mock import MOCK_POOL_SECRET, MOCK_STATE
 from ctl.queue import JobQueue, NodeUnavailableError
 from ctl.registry import NodeRegistry
 from ctl.telemetry import TelemetryFanIn
+from infer.spec import ModelSpecUnavailable, scheduler_spec
 from node.discovery import advertise_control_plane
+
+# Defaults for GET /api/plan. 8k x 1 session is the demo configuration; the
+# caller must override both to match a differently-launched llama-server.
+DEFAULT_PLAN_CONTEXT = 8192
+DEFAULT_PLAN_SLOTS = 1
 
 
 class JoinRequest(BaseModel):
@@ -210,11 +217,41 @@ def delete_node(node_id: str) -> Response:
 
 
 @app.get("/api/plan")
-def get_plan(model: str = Query(min_length=1)) -> dict[str, Any]:
+def get_plan(
+    model: str = Query(min_length=1),
+    context: int = Query(default=DEFAULT_PLAN_CONTEXT, ge=1),
+    slots: int = Query(default=DEFAULT_PLAN_SLOTS, ge=1),
+) -> dict[str, Any]:
+    """The real scheduler, over live membership.
+
+    `context` and `slots` are query parameters because kv_mb_per_layer scales
+    with both — planning at 8k and launching at 128k silently produces the
+    wrong split. They must match what llama_server_command() is launched with.
+    """
+    profiles = REGISTRY.list_profiles()
+    metrics = REGISTRY.latest_metrics()
+
+    if not profiles:
+        raise HTTPException(status_code=503, detail="no nodes are available")
+
     try:
-        return asdict(MOCK_STATE.plan(model))
-    except RuntimeError as exc:
+        model_spec = scheduler_spec(model, context, slots)
+    except KeyError as exc:
+        # A misspelled model is a bad request, not a capacity failure.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ModelSpecUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    try:
+        assignment = sched_plan(profiles, metrics, model_spec)
+    except (RuntimeError, ValueError) as exc:
+        # ValueError matters as much as RuntimeError: predict_tok_s() raises it
+        # when a node in the assignment has no measured tg_tok_s, which is the
+        # normal state while nodes calibrate and exactly what happens during
+        # the cable-pull recovery. Without it that escapes as a 500.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return asdict(assignment)
 
 
 @app.post("/api/jobs", status_code=201)

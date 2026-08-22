@@ -178,20 +178,45 @@ def test_join_and_delete_node():
     assert client.delete("/api/nodes/missing").status_code == 404
 
 
-def test_mock_plan_covers_every_node():
-    response = client.get("/api/plan", params={"model": "gpt-oss-20b"})
-    plan = response.json()
+def test_plan_rejects_an_identifier_that_is_not_a_ladder_key():
+    """`gpt-oss-20b` was never a valid identifier — the key is `castoff`.
 
-    assert response.status_code == 200
-    assert plan["model_id"] == "gpt-oss-20b"
-    assert set(plan["layers"]) == {
-        "gpu-01",
-        "office-01",
-        "office-02",
-        "mac-01",
-    }
-    assert len(plan["tensor_split"]) == 4
-    assert plan["rationale"]
+    model_id does not stop at the scheduler: fetch_models.py writes weights
+    into <dest>/<model_id>/ and Cluster.model_file resolves
+    <models>/<model_id>/<file>, so the identifier IS the directory name. A
+    misspelling is a bad request, not a capacity failure.
+    """
+    response = client.get("/api/plan", params={"model": "gpt-oss-20b"})
+
+    assert response.status_code == 404
+    assert "castoff" in response.json()["detail"]
+
+
+def test_plan_accepts_the_role_as_an_alias_for_the_key():
+    # castoff_capacity is castoff's role. Accepted, but canonicalised.
+    for identifier in ("castoff", "castoff_capacity"):
+        response = client.get("/api/plan", params={"model": identifier})
+
+        assert response.status_code in (200, 503), identifier
+        if response.status_code == 200:
+            assert response.json()["model_id"] == "castoff"
+
+
+def test_plan_503s_while_the_cluster_is_uncalibrated():
+    """The seeded nodes all report tg_tok_s = 0.0, as real nodes do until
+    SCH-1's probe runs. That must be a clean 503, never a 500."""
+    response = client.get("/api/plan", params={"model": "castoff"})
+
+    assert response.status_code == 503
+    assert "tg_tok_s" in response.json()["detail"]
+
+
+def test_plan_503s_on_a_model_with_no_measured_geometry():
+    # working/mtp/working_spare have total_layers = 0 in models.toml because
+    # nobody has read Qwen3.6-35B-A3B's block_count. Refusing beats guessing.
+    response = client.get("/api/plan", params={"model": "working"})
+
+    assert response.status_code == 503
 
 
 def test_create_and_retrieve_job():
