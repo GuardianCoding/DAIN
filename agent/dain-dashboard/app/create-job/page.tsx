@@ -90,7 +90,7 @@ export default function CreateJob() {
 
       {state === "error" && (
         <div className={styles.errorBanner} role="alert">
-          Couldn&apos;t queue the job. Check the control plane and try again.
+          Couldn't queue the job. Check the fanout settings and try again.
         </div>
       )}
 
