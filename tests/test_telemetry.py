@@ -308,3 +308,35 @@ async def test_empty_llama_metrics_are_reported() -> None:
 
         error = telemetry.frame()["errors"]["llama-server"]
         assert "no Prometheus metrics" in error
+
+@pytest.mark.asyncio
+async def test_poll_once_accepts_real_node_agent_metrics() -> None:
+    async def handler(
+        _request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'node_cpu_utilisation{node_id="node-01"} 42.5\n'
+                'node_memory_free_mib{node_id="node-01"} 5500\n'
+                'node_rpc_server_up{node_id="node-01"} 1\n'
+            ),
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    ) as client:
+        telemetry = TelemetryFanIn(
+            live_registry(),
+            client=client,
+        )
+
+        await telemetry.poll_once()
+
+        frame = telemetry.frame()
+        node = frame["nodes"][0]
+
+        assert node["cpu_percent"] == 42.5
+        assert node["ram_free_mb"] == 5500
+        assert node["jobs_running"] == 0
+        assert frame["errors"] == {}

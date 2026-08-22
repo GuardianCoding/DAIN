@@ -215,11 +215,13 @@ class TelemetryFanIn:
             cpu_percent=_required_metric(
                 prometheus,
                 "dain_node_cpu_percent",
+                "node_cpu_utilisation",
             ),
             ram_free_mb=int(
                 _required_metric(
                     prometheus,
                     "dain_node_ram_free_mb",
+                    "node_memory_free_mib",
                 )
             ),
             gpu_percent=_optional_metric(
@@ -231,10 +233,12 @@ class TelemetryFanIn:
                 "dain_node_vram_free_mb",
             ),
             jobs_running=int(
-                prometheus.get(
+                _optional_metric(
+                    prometheus,
                     "dain_node_jobs_running",
-                    0.0,
+                    "node_jobs_running",
                 )
+                or 0.0
             ),
         )
 
@@ -299,23 +303,57 @@ def parse_prometheus(body: str) -> dict[str, float]:
 def _required_metric(
     metrics: dict[str, float],
     name: str,
+    *aliases: str,
 ) -> float:
     try:
-        return metrics[name]
+        return _metric_value(metrics, name, *aliases)
     except KeyError as exc:
-        raise ValueError(f"node metrics response is missing {name}") from exc
+        raise ValueError(
+            f"node metrics response is missing {name}"
+        ) from exc
 
 
 def _optional_metric(
     metrics: dict[str, float],
     name: str,
+    *aliases: str,
 ) -> float | None:
-    return metrics.get(name)
+    try:
+        return _metric_value(metrics, name, *aliases)
+    except KeyError:
+        return None
 
 
 def _optional_integer_metric(
     metrics: dict[str, float],
     name: str,
+    *aliases: str,
 ) -> int | None:
-    value = metrics.get(name)
+    value = _optional_metric(metrics, name, *aliases)
     return None if value is None else int(value)
+
+
+def _metric_value(
+    metrics: dict[str, float],
+    name: str,
+    *aliases: str,
+) -> float:
+    for candidate in (name, *aliases):
+        if candidate in metrics:
+            return metrics[candidate]
+
+        labelled = [
+            value
+            for metric_name, value in metrics.items()
+            if metric_name.startswith(f"{candidate}{{")
+        ]
+
+        if len(labelled) == 1:
+            return labelled[0]
+
+        if len(labelled) > 1:
+            raise ValueError(
+                f"node metrics response has multiple samples for {candidate}"
+            )
+
+    raise KeyError(name)
