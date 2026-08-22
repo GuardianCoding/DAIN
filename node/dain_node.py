@@ -1,19 +1,32 @@
 import argparse
 import asyncio
-from contextlib import asynccontextmanager
-from fastapi.responses import PlainTextResponse
-import httpx
-from fastapi import FastAPI
-import uvicorn
-from contracts import NodeProfile
-
-import sys
 import os
 import signal
+import socket
 import subprocess
-import psutil
+import sys
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="DAIN Node Agent")
+import httpx
+import psutil
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
+
+from contracts import NodeProfile
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global rpc_proc
+    # Startup
+    rpc_proc = start_rpc_server("192.168.50.101", 50052)
+    yield
+    # Shutdown cleanup child
+    cleanup_rpc_server()
+
+
+app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 # Placeholder hardcoded profile
 CURRENT_PROFILE = NodeProfile(
@@ -67,7 +80,7 @@ async def heartbeat_loop(ctl_host: str):
                     json=CURRENT_PROFILE.__dict__,
                     timeout=2.0,
                 )
-            except Exception as e:
+            except Exception:
                 pass
             await asyncio.sleep(2.0)
 
@@ -96,6 +109,7 @@ def build_local_profile(node_id: str, fabric_ip: str) -> NodeProfile:
 rpc_proc: subprocess.Popen | None = None
 
 
+# Need to check where the rpc binary will be and adjust accordingly
 def start_rpc_server(
     fabric_ip: str, port: int = 50052, rpc_bin: str = "rpc-server.exe"
 ):
@@ -119,18 +133,6 @@ def cleanup_rpc_server():
             rpc_proc.kill()
         rpc_proc = None
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global rpc_proc
-    # Startup
-    rpc_proc = start_rpc_server("192.168.50.101", 50052)
-    yield
-    # Shutdown cleanup child
-    cleanup_rpc_server()
-
-
-app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 signal.signal(signal.SIGINT, lambda s, f: (cleanup_rpc_server(), sys.exit(0)))
 signal.signal(signal.SIGTERM, lambda s, f: (cleanup_rpc_server(), sys.exit(0)))
@@ -160,4 +162,4 @@ if __name__ == "__main__":
     server = uvicorn.Server(config)
     loop.run_until_complete(server.serve())
 
-    CURRENT_PROFILE = build_local_profile()
+    CURRENT_PROFILE = build_local_profile(socket.gethostname(), get_fabric_ip())
