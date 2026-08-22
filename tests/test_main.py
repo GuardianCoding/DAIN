@@ -362,3 +362,30 @@ def test_feed_broadcasts_topology_changes():
                 break
         else:
             pytest.fail("feed did not broadcast the topology change")
+
+
+def test_metrics_frame_matches_dashboard_contract():
+    frame = client.get("/api/metrics").json()
+
+    assert set(frame) == {
+        "type",
+        "nodes",
+        "history",
+        "llama",
+        "llama_history",
+        "errors",
+    }
+    assert frame["type"] == "metrics"
+
+    node_fields = {
+        "node_id",
+        "timestamp",
+        "cpu_percent",
+        "ram_free_mb",
+        "gpu_percent",
+        "vram_free_mb",
+        "jobs_running",
+    }
+
+    assert all(set(sample) == node_fields for sample in frame["nodes"])
+    assert all(len(samples) <= 60 for samples in frame["history"].values())
