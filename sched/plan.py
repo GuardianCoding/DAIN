@@ -98,10 +98,7 @@ def _repair(
 
     max_iterations = model_spec["total_layers"] * len(profiles)  # hard stop, avoid infinite loop
     for _ in range(max_iterations):
-        overflowing = [
-            node_id for node_id in layers
-            if overflow_mb(assignment, profiles, metrics, model_spec, node_id) > 0
-        ]
+        overflowing = [...]
         if not overflowing:
             break
 
@@ -109,17 +106,18 @@ def _repair(
         first, last = layers[node_id]
         node_count = last - first + 1
         if node_count <= 1:
-            # Can't shrink further — nothing left to peel off this node.
             continue
 
-        # Find the node with the most memory slack to absorb one layer.
         donor_id = _find_slack_donor(layers, profiles_by_id, metrics_by_id, model_spec, exclude=node_id)
         if donor_id is None:
-            break  # no node has room; fits() check in plan() will catch this
+            break
 
-        # Peel the last layer off the overflowing node onto the donor.
+        # Shrink the overflowing node by one layer...
         layers[node_id] = (first, last - 1)
+        # ...and grow the donor by one layer.
         donor_first, donor_last = layers[donor_id]
+        layers[donor_id] = (donor_first, donor_last + 1)
+
         # Keep layer ranges contiguous is NOT required here — donor gets an
         # extra layer count, actual layer *numbers* get renumbered by
         # _renumber_contiguous below so llama.cpp's --tensor-split still
