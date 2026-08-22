@@ -51,6 +51,7 @@ infer/benchmarks/scratch/
 .vscode/
 .idea/
 *.swp
+HANDOVER.md
 
 # OS
 .DS_Store
