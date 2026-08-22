@@ -11,6 +11,44 @@ from typing import Any
 JOB_AUTH_MAX_AGE_S = 30
 
 
+def sign_join_challenge(
+    pool_secret: str,
+    *,
+    nonce: str,
+    profile: Any,
+) -> str:
+    """Prove possession of the pool secret without sending it over the LAN."""
+    if not pool_secret:
+        raise ValueError("pool_secret must not be empty")
+    if not nonce:
+        raise ValueError("nonce must not be empty")
+
+    message = nonce.encode("utf-8") + b"\0" + _canonical_json(profile)
+    return hmac.new(
+        pool_secret.encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_join_challenge(
+    pool_secret: str,
+    *,
+    nonce: str,
+    profile: Any,
+    signature: str,
+) -> bool:
+    try:
+        expected = sign_join_challenge(
+            pool_secret,
+            nonce=nonce,
+            profile=profile,
+        )
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(expected, signature)
+
+
 def sign_job_request(
     pool_secret: str,
     *,
@@ -82,7 +120,7 @@ def _canonical_job_request(
     shard_count: int,
     issued_at: int,
 ) -> bytes:
-    return json.dumps(
+    return _canonical_json(
         {
             "issued_at": issued_at,
             "job_id": job_id,
@@ -90,7 +128,13 @@ def _canonical_job_request(
             "payload": payload,
             "shard_count": shard_count,
             "shard_index": shard_index,
-        },
+        }
+    )
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

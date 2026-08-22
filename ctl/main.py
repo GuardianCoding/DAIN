@@ -4,12 +4,13 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response, WebSocket
+from fastapi import FastAPI, Header, HTTPException, Query, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketDisconnect
 
 from contracts import NodeMetrics, NodeProfile
+from ctl.auth import AuthenticationError, JoinAuthManager
 from ctl.mock import MOCK_POOL_SECRET, MOCK_STATE
 from ctl.queue import JobQueue, NodeUnavailableError
 from ctl.registry import NodeRegistry
@@ -18,7 +19,12 @@ from ctl.telemetry import TelemetryFanIn
 
 class JoinRequest(BaseModel):
     profile: NodeProfile
-    pool_secret: str
+    nonce: str = Field(min_length=1)
+    signature: str = Field(min_length=64, max_length=64)
+
+
+class JoinChallengeRequest(BaseModel):
+    node_id: str = Field(min_length=1)
 
 
 class JobRequest(BaseModel):
@@ -49,10 +55,12 @@ REGISTRY = NodeRegistry(
 
 JOB_QUEUE = JobQueue(REGISTRY, pool_secret=MOCK_POOL_SECRET)
 TELEMETRY = TelemetryFanIn(REGISTRY)
+AUTH = JoinAuthManager(MOCK_POOL_SECRET)
 
 
 def seed_registry() -> None:
     REGISTRY.reset()
+    AUTH.reset()
 
     metrics_by_node = {metric.node_id: metric for metric in MOCK_STATE.metrics()}
 
@@ -135,11 +143,32 @@ def get_nodes() -> list[dict[str, Any]]:
 
 @app.post("/api/nodes/join", status_code=201)
 def join_node(request: JoinRequest) -> dict[str, Any]:
-    if request.pool_secret != MOCK_POOL_SECRET:
-        raise HTTPException(status_code=403, detail="invalid pool secret")
+    try:
+        token = AUTH.complete_join(
+            asdict(request.profile),
+            request.nonce,
+            request.signature,
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     profile = REGISTRY.register(request.profile)
-    return asdict(profile)
+    return {
+        **asdict(profile),
+        "access_token": token.access_token,
+        "token_type": "bearer",
+        "expires_at": token.expires_at,
+    }
+
+
+@app.post("/api/nodes/join/challenge")
+def create_join_challenge(request: JoinChallengeRequest) -> dict[str, Any]:
+    challenge = AUTH.issue_challenge(request.node_id)
+    return {
+        "node_id": challenge.node_id,
+        "nonce": challenge.nonce,
+        "expires_at": challenge.expires_at,
+    }
 
 
 @app.delete("/api/nodes/{node_id}", status_code=204)
@@ -148,6 +177,7 @@ def delete_node(node_id: str) -> Response:
         raise HTTPException(status_code=404, detail="node not found")
 
     TELEMETRY.remove(node_id)
+    AUTH.revoke(node_id)
     return Response(status_code=204)
 
 
@@ -267,7 +297,19 @@ async def send_feed(websocket: WebSocket) -> None:
 
 
 @app.post("/api/nodes/{node_id}/heartbeat")
-def heartbeat(node_id: str, request: HeartbeatRequest) -> dict[str, Any]:
+def heartbeat(
+    node_id: str,
+    request: HeartbeatRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    token = _bearer_token(authorization)
+    if token is None or not AUTH.validate_token(node_id, token):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid or expired bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         record = REGISTRY.heartbeat(node_id, request.metrics)
     except KeyError as exc:
@@ -283,3 +325,12 @@ def heartbeat(node_id: str, request: HeartbeatRequest) -> dict[str, Any]:
         "state": record.profile.state,
         "missed_heartbeats": record.missed_heartbeats,
     }
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    if authorization is None:
+        return None
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.casefold() != "bearer" or not token:
+        return None
+    return token

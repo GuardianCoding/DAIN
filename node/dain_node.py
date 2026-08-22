@@ -46,7 +46,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from contracts import NodeMetrics, NodeProfile
-from node.auth import verify_job_request
+from node.auth import sign_join_challenge, verify_job_request
 from node.index import IndexNotReadyError, LocalFileIndex
 
 LOG = logging.getLogger("dain.node")
@@ -84,6 +84,7 @@ DISCARD_PORT = 9  # UDP connect() to here fixes a route without sending a packet
 HTTP_CREATED = 201
 HTTP_FORBIDDEN = 403
 HTTP_NOT_FOUND = 404
+HTTP_UNAUTHORIZED = 401
 
 EXIT_OK = 0
 EXIT_MISCONFIGURED = 2
@@ -280,6 +281,8 @@ class NodeAgent:
     profile: NodeProfile
     ctl: str
     pool_secret: str
+    bearer_token: str | None = None
+    token_expires_at: float | None = None
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_proc: subprocess.Popen[bytes] | None = None
     search_index: LocalFileIndex = field(
@@ -289,6 +292,10 @@ class NodeAgent:
     @property
     def join_url(self) -> str:
         return f"http://{self.ctl}/api/nodes/join"
+
+    @property
+    def challenge_url(self) -> str:
+        return f"{self.join_url}/challenge"
 
     @property
     def heartbeat_url(self) -> str:
@@ -314,8 +321,44 @@ def adopt_reported_state(agent: NodeAgent, body: Any) -> None:
 
 
 async def join_pool(client: httpx.AsyncClient, agent: NodeAgent) -> bool:
-    """Register with the control plane. True once it answers 201."""
-    payload = {"profile": asdict(agent.profile), "pool_secret": agent.pool_secret}
+    """Complete the nonce/HMAC join and retain the short-lived bearer token."""
+    agent.bearer_token = None
+    agent.token_expires_at = None
+
+    try:
+        challenge_response = await client.post(
+            agent.challenge_url,
+            json={"node_id": agent.profile.id},
+            timeout=HTTP_TIMEOUT_S,
+        )
+    except httpx.HTTPError as exc:
+        LOG.warning("join challenge from %s failed: %s", agent.ctl, exc)
+        return False
+
+    if challenge_response.status_code != 200:
+        LOG.warning(
+            "join challenge returned %s: %s",
+            challenge_response.status_code,
+            challenge_response.text[:200],
+        )
+        return False
+
+    challenge = decode_body(challenge_response)
+    nonce = challenge.get("nonce") if isinstance(challenge, dict) else None
+    if not isinstance(nonce, str) or not nonce:
+        LOG.warning("join challenge returned no nonce")
+        return False
+
+    profile = asdict(agent.profile)
+    payload = {
+        "profile": profile,
+        "nonce": nonce,
+        "signature": sign_join_challenge(
+            agent.pool_secret,
+            nonce=nonce,
+            profile=profile,
+        ),
+    }
 
     try:
         response = await client.post(
@@ -338,7 +381,16 @@ async def join_pool(client: httpx.AsyncClient, agent: NodeAgent) -> bool:
         LOG.warning("join returned %s: %s", response.status_code, response.text[:200])
         return False
 
-    adopt_reported_state(agent, decode_body(response))
+    body = decode_body(response)
+    access_token = body.get("access_token") if isinstance(body, dict) else None
+    expires_at = body.get("expires_at") if isinstance(body, dict) else None
+    if not isinstance(access_token, str) or not isinstance(expires_at, (int, float)):
+        LOG.warning("join returned no bearer token")
+        return False
+
+    agent.bearer_token = access_token
+    agent.token_expires_at = float(expires_at)
+    adopt_reported_state(agent, body)
     LOG.info("joined the pool as %s on %s", agent.profile.id, agent.profile.host)
     return True
 
@@ -349,17 +401,25 @@ async def send_heartbeat(client: httpx.AsyncClient, agent: NodeAgent) -> bool:
     A transport error returns True: the control plane counts the miss and this
     node keeps beating rather than re-registering over a flapping link.
     """
+    if agent.bearer_token is None:
+        return False
+
     payload = {"metrics": asdict(sample_metrics(agent.profile.id))}
 
     try:
         response = await client.post(
-            agent.heartbeat_url, json=payload, timeout=HTTP_TIMEOUT_S
+            agent.heartbeat_url,
+            json=payload,
+            headers={"Authorization": f"Bearer {agent.bearer_token}"},
+            timeout=HTTP_TIMEOUT_S,
         )
     except httpx.HTTPError as exc:
         LOG.warning("heartbeat to %s failed: %s", agent.ctl, exc)
         return True
 
-    if response.status_code == HTTP_NOT_FOUND:
+    if response.status_code in {HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND}:
+        agent.bearer_token = None
+        agent.token_expires_at = None
         LOG.info("control plane does not know %s; re-joining", agent.profile.id)
         return False
 

@@ -30,6 +30,29 @@ from tests.node_doubles import (
     never_returns,
 )
 
+NONCE = "test-join-nonce"
+ACCESS_TOKEN = "test-access-token"
+
+
+def challenge_response() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"node_id": NODE_ID, "nonce": NONCE, "expires_at": 100.0},
+    )
+
+
+def accepted_response(agent: dain_node.NodeAgent, *, state: str = "joining"):
+    return httpx.Response(
+        201,
+        json={
+            **asdict(agent.profile),
+            "state": state,
+            "access_token": ACCESS_TOKEN,
+            "token_type": "bearer",
+            "expires_at": 300.0,
+        },
+    )
+
 
 @pytest.fixture(autouse=True)
 def clean_agent_state():
@@ -41,7 +64,13 @@ def clean_agent_state():
 
 @pytest.fixture
 def agent() -> dain_node.NodeAgent:
-    return dain_node.NodeAgent(profile=make_profile(), ctl=CTL, pool_secret=POOL_SECRET)
+    return dain_node.NodeAgent(
+        profile=make_profile(),
+        ctl=CTL,
+        pool_secret=POOL_SECRET,
+        bearer_token=ACCESS_TOKEN,
+        token_expires_at=300.0,
+    )
 
 
 @pytest.fixture
@@ -57,9 +86,9 @@ def client(agent: dain_node.NodeAgent) -> TestClient:
 
 
 @pytest.mark.asyncio
-async def test_join_wraps_the_profile_with_the_pool_secret(agent):
+async def test_join_signs_the_profile_without_sending_the_pool_secret(agent):
     # Arrange
-    ctl = FakeControlPlane(httpx.Response(201, json=asdict(agent.profile)))
+    ctl = FakeControlPlane(challenge_response(), accepted_response(agent))
 
     # Act
     async with ctl.client() as http:
@@ -67,30 +96,32 @@ async def test_join_wraps_the_profile_with_the_pool_secret(agent):
 
     # Assert — a bare profile is what the control plane rejects.
     assert joined is True
-    assert set(ctl.body().keys()) == {"profile", "pool_secret"}
-    assert ctl.body()["pool_secret"] == POOL_SECRET
-    assert ctl.body()["profile"] == asdict(make_profile())
+    assert set(ctl.body(1)) == {"profile", "nonce", "signature"}
+    assert "pool_secret" not in ctl.body(1)
+    assert ctl.body(1)["profile"] == asdict(make_profile())
+    assert ctl.body(1)["nonce"] == NONCE
+    assert len(ctl.body(1)["signature"]) == 64
+    assert agent.bearer_token == ACCESS_TOKEN
 
 
 @pytest.mark.asyncio
 async def test_join_posts_to_the_control_plane_join_endpoint(agent):
     # Arrange
-    ctl = FakeControlPlane(httpx.Response(201, json=asdict(agent.profile)))
+    ctl = FakeControlPlane(challenge_response(), accepted_response(agent))
 
     # Act
     async with ctl.client() as http:
         await dain_node.join_pool(http, agent)
 
     # Assert
-    assert str(ctl.requests[0].url) == f"http://{CTL}/api/nodes/join"
-    assert ctl.requests[0].method == "POST"
+    assert ctl.paths() == ["/api/nodes/join/challenge", "/api/nodes/join"]
+    assert all(request.method == "POST" for request in ctl.requests)
 
 
 @pytest.mark.asyncio
 async def test_join_adopts_the_state_the_control_plane_reports(agent):
     # Arrange
-    accepted = asdict(make_profile()) | {"state": "idle"}
-    ctl = FakeControlPlane(httpx.Response(201, json=accepted))
+    ctl = FakeControlPlane(challenge_response(), accepted_response(agent, state="idle"))
 
     # Act
     async with ctl.client() as http:
@@ -103,7 +134,10 @@ async def test_join_adopts_the_state_the_control_plane_reports(agent):
 @pytest.mark.asyncio
 async def test_join_is_refused_when_the_pool_secret_is_wrong(agent):
     # Arrange
-    ctl = FakeControlPlane(httpx.Response(403, json={"detail": "invalid pool secret"}))
+    ctl = FakeControlPlane(
+        challenge_response(),
+        httpx.Response(403, json={"detail": "invalid join signature"}),
+    )
 
     # Act
     async with ctl.client() as http:
@@ -117,7 +151,10 @@ async def test_join_is_refused_when_the_pool_secret_is_wrong(agent):
 @pytest.mark.asyncio
 async def test_join_fails_on_any_status_other_than_201(agent):
     # Arrange
-    ctl = FakeControlPlane(httpx.Response(200, json=asdict(agent.profile)))
+    ctl = FakeControlPlane(
+        challenge_response(),
+        httpx.Response(200, json=asdict(agent.profile)),
+    )
 
     # Act
     async with ctl.client() as http:
@@ -156,6 +193,7 @@ async def test_heartbeat_posts_to_the_node_specific_heartbeat_endpoint(agent):
 
     # Assert — not /api/nodes/join, which is a 201 create.
     assert str(ctl.requests[0].url) == f"http://{CTL}/api/nodes/{NODE_ID}/heartbeat"
+    assert ctl.requests[0].headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
 
 
 @pytest.mark.asyncio
@@ -199,6 +237,7 @@ async def test_heartbeat_asks_for_a_rejoin_when_the_node_is_unknown(agent):
 
     # Assert
     assert still_registered is False
+    assert agent.bearer_token is None
 
 
 @pytest.mark.asyncio
@@ -218,7 +257,8 @@ async def test_heartbeat_keeps_beating_through_a_transport_error(agent):
 async def test_heartbeat_loop_joins_once_then_heartbeats(agent):
     # Arrange
     ctl = FakeControlPlane(
-        httpx.Response(201, json=asdict(agent.profile)),
+        challenge_response(),
+        accepted_response(agent),
         httpx.Response(200, json={"node_id": NODE_ID}),
         httpx.Response(200, json={"node_id": NODE_ID}),
     )
@@ -229,7 +269,8 @@ async def test_heartbeat_loop_joins_once_then_heartbeats(agent):
             await dain_node.heartbeat_loop(agent, client=http, interval_s=0)
 
     # Assert
-    assert ctl.paths()[:3] == [
+    assert ctl.paths()[:4] == [
+        "/api/nodes/join/challenge",
         "/api/nodes/join",
         f"/api/nodes/{NODE_ID}/heartbeat",
         f"/api/nodes/{NODE_ID}/heartbeat",
@@ -240,9 +281,11 @@ async def test_heartbeat_loop_joins_once_then_heartbeats(agent):
 async def test_heartbeat_loop_rejoins_after_the_control_plane_forgets_the_node(agent):
     # Arrange
     ctl = FakeControlPlane(
-        httpx.Response(201, json=asdict(agent.profile)),
+        challenge_response(),
+        accepted_response(agent),
         httpx.Response(404, json={"detail": "node not found"}),
-        httpx.Response(201, json=asdict(agent.profile)),
+        challenge_response(),
+        accepted_response(agent),
     )
 
     # Act
@@ -251,9 +294,11 @@ async def test_heartbeat_loop_rejoins_after_the_control_plane_forgets_the_node(a
             await dain_node.heartbeat_loop(agent, client=http, interval_s=0)
 
     # Assert
-    assert ctl.paths()[:4] == [
+    assert ctl.paths()[:6] == [
+        "/api/nodes/join/challenge",
         "/api/nodes/join",
         f"/api/nodes/{NODE_ID}/heartbeat",
+        "/api/nodes/join/challenge",
         "/api/nodes/join",
         f"/api/nodes/{NODE_ID}/heartbeat",
     ]
@@ -263,8 +308,10 @@ async def test_heartbeat_loop_rejoins_after_the_control_plane_forgets_the_node(a
 async def test_heartbeat_loop_retries_the_join_when_it_is_refused(agent):
     # Arrange
     ctl = FakeControlPlane(
-        httpx.Response(403, json={"detail": "invalid pool secret"}),
-        httpx.Response(403, json={"detail": "invalid pool secret"}),
+        challenge_response(),
+        httpx.Response(403, json={"detail": "invalid join signature"}),
+        challenge_response(),
+        httpx.Response(403, json={"detail": "invalid join signature"}),
     )
 
     # Act
@@ -273,7 +320,13 @@ async def test_heartbeat_loop_retries_the_join_when_it_is_refused(agent):
             await dain_node.heartbeat_loop(agent, client=http, interval_s=0)
 
     # Assert — a refused node never heartbeats, it only retries the join.
-    assert ctl.paths() == ["/api/nodes/join"] * 3
+    assert ctl.paths() == [
+        "/api/nodes/join/challenge",
+        "/api/nodes/join",
+        "/api/nodes/join/challenge",
+        "/api/nodes/join",
+        "/api/nodes/join/challenge",
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -402,6 +455,7 @@ def test_configure_installs_the_agent_the_routes_read():
     # Assert
     assert dain_node.current_agent() is agent
     assert agent.join_url == f"http://{CTL}/api/nodes/join"
+    assert agent.challenge_url == f"http://{CTL}/api/nodes/join/challenge"
     assert agent.heartbeat_url == f"http://{CTL}/api/nodes/{NODE_ID}/heartbeat"
 
 
