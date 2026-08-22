@@ -486,7 +486,7 @@ async def test_lifespan_starts_and_stops_the_rpc_server(monkeypatch, agent):
     proc = FakeProcess()
     monkeypatch.setattr(dain_node, "start_rpc_server", lambda host, port: proc)
     monkeypatch.setattr(dain_node, "heartbeat_loop", never_returns)
-    monkeypatch.setattr(dain_node, "advertise_node", lambda _profile: None)
+    monkeypatch.setattr(dain_node, "advertise_node", lambda _profile, *, port: None)
 
     # Act
     async with dain_node.lifespan(dain_node.app):

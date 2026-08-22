@@ -34,7 +34,8 @@ uv run pytest
 | Method | Path | behaviour |
 | --- | --- | --- |
 | `GET` | `/api/nodes` | Returns the current in-memory node registry. |
-| `POST` | `/api/nodes/join` | Adds or replaces a node; returns `201` or `403`. |
+| `POST` | `/api/nodes/join/challenge` | Issues a one-use, 30-second join nonce. |
+| `POST` | `/api/nodes/join` | Verifies the nonce HMAC, registers the node and returns a short-lived bearer token. |
 | `DELETE` | `/api/nodes/{id}` | Removes a node; returns `204` or `404`. |
 | `GET` | `/api/plan?model=...` | Returns a deterministic mock `Assignment`. |
 | `POST` | `/api/jobs` | Creates a queued job and mock fan-out assignment. |

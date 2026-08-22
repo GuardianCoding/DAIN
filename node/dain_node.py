@@ -2,7 +2,7 @@
 
 One file, one command:
 
-    DAIN_POOL_SECRET=... python -m node.dain_node --ctl 192.168.50.20:8000
+    DAIN_POOL_SECRET=... python -m node.dain_node
 
 It profiles the machine, registers with the control plane, heartbeats every
 two seconds, exposes /health /profile /metrics /index /search /exec, and
@@ -286,6 +286,7 @@ class NodeAgent:
     pool_secret: str
     bearer_token: str | None = None
     token_expires_at: float | None = None
+    node_port: int = DEFAULT_NODE_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_proc: subprocess.Popen[bytes] | None = None
     search_index: LocalFileIndex = field(
@@ -470,7 +471,9 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
     advertisement = None
 
     try:
-        advertisement = await asyncio.to_thread(advertise_node, agent.profile)
+        advertisement = await asyncio.to_thread(
+            advertise_node, agent.profile, port=agent.node_port
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         LOG.warning("mDNS node advertisement unavailable: %s", exc)
 
@@ -519,6 +522,7 @@ def configure(
     profile: NodeProfile,
     ctl: str,
     pool_secret: str,
+    node_port: int = DEFAULT_NODE_PORT,
     rpc_port: int = DEFAULT_RPC_PORT,
     search_index: LocalFileIndex | None = None,
     sandbox: CommandSandbox | None = None,
@@ -532,6 +536,7 @@ def configure(
         profile=profile,
         ctl=ctl,
         pool_secret=pool_secret,
+        node_port=node_port,
         rpc_port=rpc_port,
         search_index=search_index or LocalFileIndex.from_environment(),
         sandbox=sandbox or CommandSandbox.from_environment(),
@@ -729,7 +734,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     ctl_host = ctl.rsplit(":", 1)[0]
     fabric_ip = detect_fabric_ip(ctl_host)
     profile = build_local_profile(args.node_id or socket.gethostname(), fabric_ip)
-    configure(profile, ctl=ctl, pool_secret=pool_secret, rpc_port=args.rpc_port)
+    configure(
+        profile,
+        ctl=ctl,
+        pool_secret=pool_secret,
+        node_port=args.port,
+        rpc_port=args.rpc_port,
+    )
 
     LOG.info(
         "profiled %s: %s, %s cores, %s MiB RAM, fabric %s",

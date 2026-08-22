@@ -111,7 +111,7 @@ install_system_dependencies() {
   log "Installing Linux prerequisites"
   run apt-get update -qq
   run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    bubblewrap ca-certificates curl git iproute2 python3 python3-venv ufw util-linux
+    bubblewrap ca-certificates curl git iproute2 python3 python3-venv ripgrep ufw util-linux
 }
 
 ensure_service_user() {
