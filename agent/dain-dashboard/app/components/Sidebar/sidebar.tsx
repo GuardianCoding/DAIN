@@ -71,18 +71,7 @@ export default function Sidebar() {
         </div>
       </nav>
 
-      <div className={styles.footer}>
-        <div className={styles.connection}>
-          <span className={styles.connectionDot} />
 
-          <div>
-            <span className={styles.connectionLabel}>Cluster</span>
-            <span className={styles.connectionStatus}>Connected</span>
-          </div>
-        </div>
-
-        <span className={styles.version}>v0.1.0</span>
-      </div>
     </aside>
   );
 }
