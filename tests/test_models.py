@@ -25,6 +25,7 @@ repo = "org/alpha"
 include = "*.gguf"
 size_gb = 1.0
 priority = 1
+total_layers = 24
 
 [models.beta]
 role = "working"
@@ -34,6 +35,7 @@ size_gb = 2.0
 params_total_b = 35.0
 params_active_b = 3.0
 priority = 2
+total_layers = 36
 claim = "does a thing"
 """
 
@@ -107,20 +109,20 @@ class TestLoadLadder:
 class TestModelSpec:
     def test_converts_decimal_gb_to_binary_mib(self):
         # Arrange — 1 GB is NOT 1024 MiB, and confusing them oversizes a claim
-        spec = ModelSpec("m", "r", "org/r", "*", 1.0, 1.0, 1.0, 1, "", "")
+        spec = ModelSpec("m", "r", "org/r", "*", 1.0, 1.0, 1.0, 1, 24, "", "")
 
         # Act / Assert
         assert spec.weights_mib == pytest.approx(1000**3 / 1024**2)
 
     def test_sparsity_is_total_over_active(self):
         # Arrange
-        spec = ModelSpec("m", "r", "org/r", "*", 20.0, 35.0, 3.0, 1, "", "")
+        spec = ModelSpec("m", "r", "org/r", "*", 20.0, 35.0, 3.0, 1, 24, "", "")
 
         # Act / Assert
         assert spec.sparsity == pytest.approx(35.0 / 3.0)
 
     def test_sparsity_rejects_unknown_active_params(self):
-        spec = ModelSpec("m", "r", "org/r", "*", 20.0, 35.0, 0.0, 1, "", "")
+        spec = ModelSpec("m", "r", "org/r", "*", 20.0, 35.0, 0.0, 1, 24, "", "")
         with pytest.raises(ValueError, match="params_active_b"):
             _ = spec.sparsity
 

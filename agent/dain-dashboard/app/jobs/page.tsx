@@ -175,6 +175,70 @@ export default function JobsPage() {
                               )}
                             </div>
 
+                            {/* Generated text first, per node. An infer job
+                                fanned out over five machines is the whole
+                                demo, and it is unreadable as raw JSON. */}
+                            {shards.some((s) => typeof s.text === "string" && s.text) && (
+                              <div className={styles.detailFull}>
+                                <span className={styles.detailLabel}>Output</span>
+                                {shards.map((s, i) => (
+                                  <div key={i} className={styles.completion}>
+                                    <div className={styles.completionMeta}>
+                                      <span className={styles.mono}>
+                                        {typeof s.node_id === "string" ? s.node_id : `shard ${i}`}
+                                      </span>
+                                      {typeof s.tok_s === "number" && (
+                                        <span>{s.tok_s.toFixed(1)} tok/s</span>
+                                      )}
+                                      {typeof s.completion_tokens === "number" && (
+                                        <span>{s.completion_tokens} tokens</span>
+                                      )}
+                                      {typeof s.model === "string" && (
+                                        <span className={styles.mono}>{s.model}</span>
+                                      )}
+                                    </div>
+                                    <p className={styles.completionText}>{String(s.text)}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Bench numbers as a table. tg is the one the
+                                scheduler's cost model uses; pp is roughly an
+                                order of magnitude faster, so showing them
+                                side by side makes a swapped pair obvious. */}
+                            {shards.some((s) => typeof s.tg_tok_s === "number" || typeof s.pp_tok_s === "number") && (
+                              <div className={styles.detailFull}>
+                                <span className={styles.detailLabel}>Measured throughput</span>
+                                <table className={styles.benchTable}>
+                                  <thead>
+                                    <tr>
+                                      <th>Node</th>
+                                      <th>Decode (tg)</th>
+                                      <th>Prefill (pp)</th>
+                                      <th>Model</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {shards.map((s, i) => (
+                                      <tr key={i}>
+                                        <td className={styles.mono}>
+                                          {typeof s.node_id === "string" ? s.node_id : `shard ${i}`}
+                                        </td>
+                                        <td className={styles.mono}>
+                                          {typeof s.tg_tok_s === "number" ? `${s.tg_tok_s.toFixed(1)} tok/s` : "—"}
+                                        </td>
+                                        <td className={styles.mono}>
+                                          {typeof s.pp_tok_s === "number" ? `${s.pp_tok_s.toFixed(1)} tok/s` : "—"}
+                                        </td>
+                                        <td>{typeof s.model === "string" ? s.model : "—"}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+
                             {shards.length > 0 && (
                               <div className={styles.detailFull}>
                                 <span className={styles.detailLabel}>Shard results</span>

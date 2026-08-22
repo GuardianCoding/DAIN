@@ -289,3 +289,58 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+/* Per-node generated text for infer jobs. */
+
+.completion {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #1e222a;
+  border-left: 2px solid #5965ff;
+  border-radius: 6px;
+  background: #0d1015;
+}
+
+.completionMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 7px;
+  color: #666d79;
+  font-size: 10px;
+}
+
+.completionText {
+  color: #dce0e6;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Measured throughput table for bench jobs. */
+
+.benchTable {
+  width: 100%;
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.benchTable th {
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid #1e222a;
+  color: #666d79;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.benchTable td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid #171a20;
+  color: #dce0e6;
+}
+
+.benchTable tr:last-child td {
+  border-bottom: none;
+}

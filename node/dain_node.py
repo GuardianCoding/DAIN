@@ -49,7 +49,9 @@ from pydantic import BaseModel, Field
 from contracts import NodeMetrics, NodeProfile
 from node.auth import sign_join_challenge, verify_job_request
 from node.discovery import advertise_node, discover_control_plane
+from node.bench import BenchUnavailableError, LocalBench, measure
 from node.index import EmbeddingUnavailableError, IndexNotReadyError, LocalFileIndex
+from node.infer import InferenceUnavailableError, LocalInference
 from node.sandbox import CommandSandbox, SandboxExecutionError, SandboxRejected
 
 LOG = logging.getLogger("dain.node")
@@ -194,6 +196,61 @@ def build_local_profile(node_id: str, fabric_ip: str) -> NodeProfile:
     )
 
 
+def calibrate_profile(profile: NodeProfile, bench: LocalBench) -> NodeProfile:
+    """SCH-1: fill tg_tok_s / pp_tok_s by measuring, before the node joins.
+
+    This is the ONLY place those two fields ever become non-zero. The chain the
+    scheduler depends on is:
+
+        measure() here -> the join payload -> REGISTRY.register()
+        -> REGISTRY.list_profiles() -> sched.plan(profiles, ...)
+
+    ctl computes nothing; the registry is a passthrough store. So a node that
+    never calibrates reports 0.0 forever, and cost.predict_tok_s() raises on it.
+
+    Runs before joining because REGISTRY.register() takes the profile as given
+    at join. (Re-registering does replace it, so a later re-join would also
+    publish a fresh number — but then GET /api/plan is wrong in the window
+    between, which is worse than a slower start.)
+
+    Never fatal: a node with no model or no llama-bench is still a useful node
+    for exec, index and search. It just cannot be placed by the scheduler.
+    """
+    if not bench.configured:
+        LOG.info(
+            "no $%s or $%s; joining uncalibrated (tg_tok_s stays 0.0, so this "
+            "node cannot be placed by the scheduler)",
+            "DAIN_BENCH_MODEL",
+            "DAIN_INFER_MODEL",
+        )
+        return profile
+
+    LOG.info("calibrating with llama-bench; this takes a minute on a slow node")
+    try:
+        result = asyncio.run(measure(bench))
+    except (BenchUnavailableError, ValueError) as exc:
+        LOG.warning("calibration failed, joining uncalibrated: %s", exc)
+        return profile
+
+    if not result.tg_tok_s:
+        LOG.warning("calibration produced no decode speed; joining uncalibrated")
+        return profile
+
+    LOG.info(
+        "calibrated %s: %.1f tok/s decode, %.1f tok/s prefill",
+        profile.id,
+        result.tg_tok_s,
+        result.pp_tok_s or 0.0,
+    )
+    # A new profile rather than a mutated one: /profile and the join payload
+    # both read it, and a half-updated profile is worse than an honest zero.
+    return replace(
+        profile,
+        tg_tok_s=result.tg_tok_s,
+        pp_tok_s=result.pp_tok_s or 0.0,
+    )
+
+
 def sample_metrics(node_id: str) -> NodeMetrics:
     """One live sample for the heartbeat body and the /metrics endpoint."""
     memory = psutil.virtual_memory()
@@ -293,6 +350,8 @@ class NodeAgent:
         default_factory=LocalFileIndex.from_environment
     )
     sandbox: CommandSandbox = field(default_factory=CommandSandbox.from_environment)
+    inference: LocalInference = field(default_factory=LocalInference.from_environment)
+    bench: LocalBench = field(default_factory=LocalBench.from_environment)
 
     @property
     def join_url(self) -> str:
@@ -467,6 +526,10 @@ async def heartbeat_loop(
 async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
     agent = current_agent(scope)
     agent.rpc_proc = start_rpc_server(agent.profile.host, agent.rpc_port)
+    # No-op unless DAIN_INFER_MODEL names a GGUF on this machine. Deliberately
+    # not awaited: a large model takes minutes to load and this node must
+    # finish joining the pool meanwhile. /infer polls readiness per request.
+    agent.inference.start()
     beat = asyncio.create_task(heartbeat_loop(agent))
     advertisement = None
 
@@ -485,6 +548,8 @@ async def lifespan(scope: FastAPI) -> AsyncIterator[None]:
             await beat
         stop_rpc_server(agent.rpc_proc)
         agent.rpc_proc = None
+        agent.inference.stop()
+        await agent.inference.aclose()
         if advertisement is not None:
             await asyncio.to_thread(advertisement.close)
 
@@ -494,7 +559,11 @@ app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 class LocalJobRequest(BaseModel):
     job_id: str = Field(min_length=1)
-    kind: Literal["exec", "index", "search"]
+    # Must stay in step with ctl.queue.DEFAULT_ENDPOINTS. A kind ctl can
+    # dispatch but this Literal omits is rejected by request validation before
+    # routing ever happens — which is why /infer and /bench each needed the
+    # Literal widened as well as a route added.
+    kind: Literal["exec", "index", "search", "infer", "bench"]
     payload: dict[str, Any] = Field(default_factory=dict)
     shard_index: int = Field(ge=0)
     shard_count: int = Field(ge=1)
@@ -526,6 +595,8 @@ def configure(
     rpc_port: int = DEFAULT_RPC_PORT,
     search_index: LocalFileIndex | None = None,
     sandbox: CommandSandbox | None = None,
+    inference: LocalInference | None = None,
+    bench: LocalBench | None = None,
 ) -> NodeAgent:
     """Install the agent state the routes and the lifespan read.
 
@@ -540,6 +611,8 @@ def configure(
         rpc_port=rpc_port,
         search_index=search_index or LocalFileIndex.from_environment(),
         sandbox=sandbox or CommandSandbox.from_environment(),
+        inference=inference or LocalInference.from_environment(),
+        bench=bench or LocalBench.from_environment(),
     )
     app.state.agent = agent
     return agent
@@ -579,6 +652,12 @@ async def metrics() -> str:
         f"# HELP node_rpc_server_up 1 when the local rpc-server is running\n"
         f"# TYPE node_rpc_server_up gauge\n"
         f"node_rpc_server_up{label} {rpc_up}\n"
+        f"# HELP node_infer_up 1 when this node has an inference backend\n"
+        f"# TYPE node_infer_up gauge\n"
+        f"node_infer_up{label} {int(agent.inference.running)}\n"
+        f"# HELP node_bench_available 1 when llama-bench and a model are present\n"
+        f"# TYPE node_bench_available gauge\n"
+        f"node_bench_available{label} {int(agent.bench.available)}\n"
     )
 
 
@@ -688,6 +767,62 @@ async def execute(request: LocalJobRequest) -> dict[str, Any]:
     }
 
 
+@app.post("/infer")
+async def infer(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "infer":
+        raise HTTPException(status_code=422, detail="kind must be infer")
+
+    try:
+        result = await agent.inference.complete(request.payload)
+    except ValueError as exc:
+        # Bad prompt/max_tokens/temperature — the caller's fault, and fixable.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except InferenceUnavailableError as exc:
+        # No backend configured, still loading, or llama-server died. 503 so
+        # the queue's retry treats it as transient and tries another node,
+        # matching how /index reports a missing embedding model.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "result": {
+            "node_id": agent.profile.id,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            **result,
+        },
+    }
+
+
+@app.post("/bench")
+async def bench(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "bench":
+        raise HTTPException(status_code=422, detail="kind must be bench")
+
+    try:
+        result = await agent.bench.run(request.payload)
+    except ValueError as exc:
+        # A bad repetitions/prompt_tokens/gen_tokens — the caller's mistake,
+        # and retrying it on another node would fail identically.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except BenchUnavailableError as exc:
+        # No binary, no model, or the run failed. 503 so the queue's retry
+        # moves the shard to a node that does have a build.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "result": {
+            "node_id": agent.profile.id,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            **result,
+        },
+    }
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -705,6 +840,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_NODE_PORT)
     parser.add_argument("--rpc-port", type=int, default=DEFAULT_RPC_PORT)
     parser.add_argument("--node-id", default=None, help="defaults to the hostname")
+    parser.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        help="skip the llama-bench probe; joins with tg_tok_s = 0.0, which "
+        "means the scheduler cannot place this node",
+    )
     return parser.parse_args(argv)
 
 
@@ -734,6 +875,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     ctl_host = ctl.rsplit(":", 1)[0]
     fabric_ip = detect_fabric_ip(ctl_host)
     profile = build_local_profile(args.node_id or socket.gethostname(), fabric_ip)
+
+    # Before configure(), because the join payload is built from this profile
+    # and REGISTRY.register() stores whatever it is handed. This is where
+    # tg_tok_s stops being 0.0 and GET /api/plan becomes answerable.
+    if not args.no_calibrate:
+        profile = calibrate_profile(profile, LocalBench.from_environment())
+
     configure(
         profile,
         ctl=ctl,
