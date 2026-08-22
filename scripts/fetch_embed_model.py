@@ -17,11 +17,15 @@ that will serve index/search, while you still have a network.
 
 NOTE ON WHICH MODEL: this is NOT the `embed` entry in infer/models.toml. That
 ladder is llama.cpp GGUF weights for the inference fabric and names
-Qwen3-Embedding-0.6B; node/index.py independently defaults to
-sentence-transformers' BAAI/bge-small-en-v1.5. Two different stacks, two
-different caches, and only the second one serves /index. If the team wants a
-single embedding model that is a decision to make deliberately — this script
-follows node/index.py, because that is what /index actually loads.
+Qwen3-Embedding-0.6B; node/index.py independently defaults to FastEmbed's
+BAAI/bge-small-en-v1.5. Two different stacks, two different caches, and only
+the second one serves /index. If the team wants a single embedding model that
+is a decision to make deliberately — this script follows node/index.py,
+because that is what /index actually loads.
+
+scripts/install_node.sh already does this during a normal install. Reach for
+this when the cache is missing anyway: a node installed before that step
+existed, a cache wiped by cleanup, or a hand-built node.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from node.index import (  # noqa: E402
+from node.index import (
     DEFAULT_EMBED_MODEL,
     EMBED_CACHE_ENV,
     EMBED_MODEL_ENV,
@@ -44,7 +48,7 @@ from node.index import (  # noqa: E402
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="fetch_embed_model",
-        description="Download the sentence-transformers model /index needs.",
+        description="Download the FastEmbed model /index needs.",
     )
     parser.add_argument(
         "--model",
@@ -54,7 +58,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--cache",
         default=os.getenv(EMBED_CACHE_ENV),
-        help=f"cache directory (default: ${EMBED_CACHE_ENV}, else the ST default)",
+        help=f"cache directory (default: ${EMBED_CACHE_ENV}, else FastEmbed's)",
     )
     parser.add_argument(
         "--check",
@@ -65,11 +69,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def load(model_id: str, cache: str | None, *, local_only: bool):
-    from sentence_transformers import SentenceTransformer
+    """Load exactly the way node/index.py does.
 
-    return SentenceTransformer(
-        model_name_or_path=model_id,
-        cache_folder=cache,
+    FastEmbed, not sentence-transformers — different constructor, different
+    cache layout. Loading it via the wrong library would report success while
+    leaving /index's cache empty. lazy_load=False forces the weights to be
+    fetched now rather than on first embed, which is the whole point.
+    """
+    from fastembed import TextEmbedding
+
+    return TextEmbedding(
+        model_name=model_id,
+        cache_dir=cache,
+        lazy_load=False,
         local_files_only=local_only,
     )
 
@@ -78,23 +90,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     try:
-        import sentence_transformers  # noqa: F401
+        import fastembed  # noqa: F401
     except ImportError:
         print(
-            "sentence-transformers is not installed in this environment.\n"
-            "Install it on the node that serves /index, then re-run.",
+            "fastembed is not installed in this environment.\n"
+            "Run this on the node that serves /index, inside its venv.",
             file=sys.stderr,
         )
         return 1
 
     print(f"model: {args.model}")
-    print(f"cache: {args.cache or 'the sentence-transformers default cache'}")
+    print(f"cache: {args.cache or 'the FastEmbed default cache'}")
 
     # Always try offline first. If it loads there is nothing to do, and we
     # avoid touching the network on a machine that is already provisioned.
     try:
         load(args.model, args.cache, local_only=True)
-    except Exception as exc:  # noqa: BLE001 - ST raises several unrelated types
+    except Exception as exc:  # noqa: BLE001 - FastEmbed raises unrelated types
         if args.check:
             print(f"NOT CACHED — /index would return 503 ({type(exc).__name__})")
             return 1
@@ -119,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("cached and verified offline — /index will work on this node")
     if args.cache:
-        print(f"\nSet on the node so it finds the same cache:")
+        print("\nSet on the node so it finds the same cache:")
         print(f"  export {EMBED_CACHE_ENV}={args.cache}")
     return 0
 
