@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from ctl.main import JOB_QUEUE, app, seed_registry
+from ctl.main import JOB_QUEUE, TELEMETRY, app, seed_registry
 from ctl.mock import MOCK_POOL_SECRET, reset_mock_state
 
 client: TestClient
@@ -201,6 +201,14 @@ def test_metrics_cover_every_node():
         "office-02",
         "mac-01",
     }
+    assert set(message["history"]) == {
+        "gpu-01",
+        "office-01",
+        "office-02",
+        "mac-01",
+    }
+    assert message["llama"] == {}
+    assert message["llama_history"] == []
     assert all(metric["timestamp"] > 0 for metric in message["nodes"])
 
 
@@ -257,6 +265,7 @@ def test_feed_exposes_all_four_frame_types():
     assert len(topology["nodes"]) == 4
 
     assert len(metrics["nodes"]) == 4
+    assert len(metrics["history"]) == 4
 
     assert event["message"]
 
@@ -289,6 +298,11 @@ def test_heartbeat_updates_joined_node():
         "state": "idle",
         "missed_heartbeats": 0,
     }
+    frame = client.get("/api/metrics").json()
+    guest = next(metric for metric in frame["nodes"] if metric["node_id"] == "guest-01")
+
+    assert guest["ram_free_mb"] == 11000
+    assert frame["history"]["guest-01"][-1]["timestamp"] == 1000.0
 
 
 def test_heartbeat_rejects_unknown_node():
@@ -320,3 +334,31 @@ def test_heartbeat_rejects_mismatched_metrics():
     )
 
     assert response.status_code == 422
+
+
+def test_telemetry_background_task_is_running():
+    assert TELEMETRY.task is not None
+    assert not TELEMETRY.task.done()
+
+
+def test_feed_broadcasts_topology_changes():
+    with client.websocket_connect("/feed") as websocket:
+        initial = websocket.receive_json()
+        assert initial["type"] == "topology"
+
+        response = client.post(
+            "/api/nodes/join",
+            json=joined_node_payload(),
+        )
+        assert response.status_code == 201
+
+        for _ in range(20):
+            frame = websocket.receive_json()
+
+            if frame.get("type") != "topology":
+                continue
+
+            if any(node["id"] == "guest-01" for node in frame["nodes"]):
+                break
+        else:
+            pytest.fail("feed did not broadcast the topology change")

@@ -13,6 +13,7 @@ from contracts import NodeMetrics, NodeProfile
 from ctl.mock import MOCK_POOL_SECRET, MOCK_STATE
 from ctl.queue import JobQueue, NodeUnavailableError
 from ctl.registry import NodeRegistry
+from ctl.telemetry import TelemetryFanIn
 
 
 class JoinRequest(BaseModel):
@@ -47,6 +48,7 @@ REGISTRY = NodeRegistry(
 )
 
 JOB_QUEUE = JobQueue(REGISTRY)
+TELEMETRY = TelemetryFanIn(REGISTRY)
 
 
 def seed_registry() -> None:
@@ -66,6 +68,8 @@ def seed_registry() -> None:
             metrics_by_node[profile_copy.id],
         )
 
+    TELEMETRY.reset(REGISTRY.latest_metrics())
+
 
 seed_registry()
 
@@ -79,6 +83,7 @@ async def monitor_heartbeats() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     monitor_task = asyncio.create_task(monitor_heartbeats())
+    await TELEMETRY.start()
 
     try:
         yield
@@ -90,6 +95,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except asyncio.CancelledError:
             pass
 
+        await TELEMETRY.close()
         await JOB_QUEUE.close()
 
 
@@ -137,6 +143,7 @@ def delete_node(node_id: str) -> Response:
     if not REGISTRY.remove(node_id):
         raise HTTPException(status_code=404, detail="node not found")
 
+    TELEMETRY.remove(node_id)
     return Response(status_code=204)
 
 
@@ -183,10 +190,7 @@ def get_job(job_id: str) -> dict[str, Any]:
 
 @app.get("/api/metrics")
 def get_metrics() -> dict[str, Any]:
-    return {
-        "type": "metrics",
-        "nodes": [asdict(metric) for metric in REGISTRY.latest_metrics()],
-    }
+    return TELEMETRY.frame()
 
 
 @app.post("/api/race")
@@ -197,18 +201,19 @@ def run_race(request: RaceRequest) -> dict[str, Any]:
 @app.websocket("/feed")
 async def send_feed(websocket: WebSocket) -> None:
     await websocket.accept()
-    await websocket.send_json(
-        {
-            "type": "topology",
-            "nodes": get_nodes(),
-        }
-    )
-
+    topology = get_nodes()
+    await websocket.send_json({"type": "topology", "nodes": topology})
     last_registry_sequence = 0
     last_queue_sequence = 0
+    last_topology = topology
 
     try:
         while True:
+            topology = get_nodes()
+            if topology != last_topology:
+                await websocket.send_json({"type": "topology", "nodes": topology})
+                last_topology = topology
+
             await websocket.send_json(get_metrics())
 
             registry_events = REGISTRY.events_after(last_registry_sequence)
@@ -250,8 +255,7 @@ async def send_feed(websocket: WebSocket) -> None:
                     )
 
                 last_queue_sequence = event.sequence
-
-            await asyncio.sleep(1)
+                await asyncio.sleep(TELEMETRY.interval_s)
 
     except WebSocketDisconnect:
         return
@@ -265,6 +269,9 @@ def heartbeat(node_id: str, request: HeartbeatRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="node not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if request.metrics is not None:
+        TELEMETRY.record(request.metrics)
 
     return {
         "node_id": record.profile.id,
