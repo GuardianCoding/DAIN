@@ -36,13 +36,9 @@ heartbeat_interval_s = 2
 replan_debounce_s = 5
 min_workers = 0
 
-[paths.linux]
+[paths]
 models = "/srv/dain/models"
 llama = "/opt/dain/llama.cpp/build/bin"
-
-[paths.windows]
-models = "C:/dain/models"
-llama = "C:/dain/llama.cpp/build/bin/Release"
 
 [llama]
 pinned_commit = "abc123"
@@ -68,28 +64,30 @@ def cluster(tmp_path):
 
 # Hosts are supplied at runtime by the registry, never read from config.
 HEAD = Member("gpu-01", "10.0.0.1", "linux-desktop", "cuda", is_head=True)
-WIN_WORKER = Member("gpu-02", "10.0.0.2", "windows-desktop", "vulkan")
+# gpu-02 runs WSL2. Under mirrored networking it holds a LAN address like any
+# other node, which is the whole point of requiring mirrored mode.
+WSL_WORKER = Member("gpu-02", "10.0.0.2", "linux-wsl", "cpu")
 CPU_WORKER = Member("office-01", "10.0.0.3", "linux-headless", "cpu")
 
 
 class TestMembership:
     def test_splits_head_from_workers(self):
-        head, workers = split_head((HEAD, WIN_WORKER, CPU_WORKER))
+        head, workers = split_head((HEAD, WSL_WORKER, CPU_WORKER))
         assert head.node_id == "gpu-01"
         assert [worker.node_id for worker in workers] == ["gpu-02", "office-01"]
 
     def test_rejects_membership_with_no_head(self):
         with pytest.raises(ValueError, match="exactly one head"):
-            split_head((WIN_WORKER, CPU_WORKER))
+            split_head((WSL_WORKER, CPU_WORKER))
 
     def test_rejects_membership_with_two_heads(self):
-        second = Member("gpu-02", "10.0.0.2", "linux-desktop", "vulkan", is_head=True)
+        second = Member("gpu-02", "10.0.0.2", "linux-wsl", "cpu", is_head=True)
         with pytest.raises(ValueError, match="exactly one head"):
             split_head((HEAD, second))
 
     def test_endpoints_follow_member_order(self, cluster):
         # Arrange / Act — this ORDER is what --tensor-split is positional against
-        endpoints = rpc_endpoints(cluster, (WIN_WORKER, CPU_WORKER))
+        endpoints = rpc_endpoints(cluster, (WSL_WORKER, CPU_WORKER))
 
         # Assert
         assert endpoints == "10.0.0.2:50052,10.0.0.3:50052"
@@ -99,14 +97,34 @@ class TestMembership:
         assert "--rpc" not in llama_server_command(cluster, "/m/model.gguf", (HEAD,))
 
 
-class TestPathsAcrossOperatingSystems:
-    def test_windows_member_gets_an_exe_and_windows_paths(self, cluster):
-        command = llama_bench_command(cluster, WIN_WORKER, "C:/dain/models/w/m.gguf")
-        assert command[0] == "C:/dain/llama.cpp/build/bin/Release/llama-bench.exe"
+class TestPaths:
+    """One path layout, because every node is Linux — gpu-02 via WSL2.
 
-    def test_linux_member_gets_no_suffix_and_posix_paths(self, cluster):
-        command = llama_bench_command(cluster, CPU_WORKER, "/srv/dain/models/w/m.gguf")
-        assert command[0] == "/opt/dain/llama.cpp/build/bin/llama-bench"
+    The OS-branching these tests used to cover is gone on purpose. If a binary
+    name or a suffix ever differs by node again, it is a new node class and it
+    needs a new decision, not a silent `if`.
+    """
+
+    def test_every_member_resolves_the_same_binary_path(self, cluster):
+        # Arrange / Act — a WSL node and a bare-metal node
+        wsl = llama_bench_command(cluster, WSL_WORKER, "/srv/dain/models/w/m.gguf")
+        metal = llama_bench_command(cluster, CPU_WORKER, "/srv/dain/models/w/m.gguf")
+
+        # Assert
+        assert wsl[0] == metal[0] == "/opt/dain/llama.cpp/build/bin/llama-bench"
+
+    def test_binaries_carry_no_executable_suffix(self, cluster):
+        assert not cluster.binary("rpc-server").endswith(".exe")
+
+    def test_model_files_resolve_under_the_linux_models_root(self, cluster):
+        # Never under /mnt/c on gpu-02: that path reads across the 9p bridge.
+        path = cluster.model_file("calibration", "qwen3-0.6b-q4_k_m.gguf")
+        assert path == "/srv/dain/models/calibration/qwen3-0.6b-q4_k_m.gguf"
+        assert not path.startswith("/mnt/")
+
+    def test_an_unknown_path_key_names_the_section_it_is_missing_from(self, cluster):
+        with pytest.raises(KeyError, match=r"\[paths\].nope"):
+            cluster.path_for("nope")
 
 
 class TestRpcWorkerBinding:

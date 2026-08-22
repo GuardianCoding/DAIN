@@ -4,6 +4,10 @@ Every function here is pure: it returns a list of argv tokens and runs nothing.
 These commands get pasted into terminals and read aloud at 3am, so they have to
 be inspectable before they are executable.
 
+Every node is Linux x86-64 — gpu-02 through WSL2 — so there is one binary name,
+one path layout and no OS branching anywhere in this module. If a Windows node
+ever comes back, it does not come back here: it gets its own module.
+
 Addressing is RUNTIME, never configuration. A `Member` is a node the control
 plane currently believes is alive — it comes from GET /api/nodes, which is fed
 by mDNS join and expired by missed heartbeats. Nothing here reads a configured
@@ -24,8 +28,6 @@ from pathlib import Path
 from typing import Protocol
 
 CLUSTER_PATH = Path(__file__).resolve().parent.parent / "cluster.toml"
-
-WINDOWS_OS_CLASSES = frozenset({"windows-desktop", "windows-lean"})
 
 
 class Placement(Protocol):
@@ -55,16 +57,12 @@ class Member:
     backend: str
     is_head: bool = False
 
-    @property
-    def is_windows(self) -> bool:
-        return self.os_class in WINDOWS_OS_CLASSES
-
 
 @dataclass(frozen=True)
 class Cluster:
     """Settings shared by every node. Contains no node identity and no addresses."""
 
-    paths: dict[str, dict[str, str]]
+    paths: dict[str, str]
     rpc_port: int
     llama_port: int
     ctl_port: int
@@ -73,19 +71,23 @@ class Cluster:
     replan_debounce_s: float
     min_workers: int
 
-    def path_for(self, member: Member, key: str) -> str:
-        family = "windows" if member.is_windows else "linux"
+    def path_for(self, key: str) -> str:
+        """One path per key, because every node is Linux.
+
+        gpu-02 runs under WSL2, which is Linux as far as these paths are
+        concerned — provided nothing lives under /mnt/c. See [wsl] in
+        cluster.toml.
+        """
         try:
-            return self.paths[family][key]
+            return self.paths[key]
         except KeyError as error:
-            raise KeyError(f"cluster.toml has no [paths.{family}].{key}") from error
+            raise KeyError(f"cluster.toml has no [paths].{key}") from error
 
-    def binary(self, member: Member, name: str) -> str:
-        suffix = ".exe" if member.is_windows else ""
-        return f"{self.path_for(member, 'llama')}/{name}{suffix}"
+    def binary(self, name: str) -> str:
+        return f"{self.path_for('llama')}/{name}"
 
-    def model_file(self, member: Member, model_id: str, filename: str) -> str:
-        return f"{self.path_for(member, 'models')}/{model_id}/{filename}"
+    def model_file(self, model_id: str, filename: str) -> str:
+        return f"{self.path_for('models')}/{model_id}/{filename}"
 
 
 def load_cluster(path: Path = CLUSTER_PATH) -> Cluster:
@@ -103,7 +105,7 @@ def load_cluster(path: Path = CLUSTER_PATH) -> Cluster:
     discovery = raw["discovery"]
     membership = raw["membership"]
     return Cluster(
-        paths={str(key): dict(value) for key, value in raw["paths"].items()},
+        paths={str(key): str(value) for key, value in raw["paths"].items()},
         rpc_port=int(discovery["rpc_port"]),
         llama_port=int(discovery["llama_port"]),
         ctl_port=int(discovery["ctl_port"]),
@@ -128,8 +130,13 @@ def rpc_endpoints(cluster: Cluster, workers: tuple[Member, ...]) -> str:
 
 
 def verify_build_command(cluster: Cluster, member: Member) -> list[str]:
-    """INF-1 on a mixed-OS cluster: assert the same COMMIT, not the same checksum."""
-    return [cluster.binary(member, "llama-server"), "--version"]
+    """INF-1: assert the same COMMIT on every node.
+
+    `member` is unused for the path now that every node is Linux, but stays in
+    the signature because the caller iterates members and the RESULT is
+    per-node: this command is run over ssh on each one and the outputs compared.
+    """
+    return [cluster.binary("llama-server"), "--version"]
 
 
 def rpc_worker_command(cluster: Cluster, member: Member, bind_address: str) -> list[str]:
@@ -139,6 +146,14 @@ def rpc_worker_command(cluster: Cluster, member: Member, bind_address: str) -> l
     the interface with a route to the control plane) — it is never read from
     config. rpc-server has NO authentication whatsoever, so binding this to
     0.0.0.0 or to venue WiFi hands arbitrary compute to anyone who can reach it.
+
+    On gpu-02 that address is the LAN address WSL sees under mirrored
+    networking. Under WSL's default NAT it would be a 172.x address on a virtual
+    switch nothing else can route to, which is why [wsl] in cluster.toml
+    requires mirrored mode.
+
+    `member` no longer selects a path — every node is Linux — but stays in the
+    signature so the call site records which node each argv belongs to.
     """
     if bind_address in ("0.0.0.0", "::", ""):
         raise ValueError(
@@ -146,7 +161,7 @@ def rpc_worker_command(cluster: Cluster, member: Member, bind_address: str) -> l
             f"Pass the fabric interface address for this node."
         )
     return [
-        cluster.binary(member, "rpc-server"),
+        cluster.binary("rpc-server"),
         "--host", bind_address,
         "-p", str(cluster.rpc_port),
         "-c",                       # cache weights locally; makes re-plans fast
@@ -196,7 +211,7 @@ def llama_server_command(
         raise ValueError(f"only {len(workers)} worker(s); cluster.min_workers is {cluster.min_workers}")
 
     command = [
-        cluster.binary(head, "llama-server"),
+        cluster.binary("llama-server"),
         "-m", model_file,
         "-c", str(context),
         "-np", str(slots),
@@ -230,7 +245,7 @@ def solo_probe_command(cluster: Cluster, member: Member, model_file: str, *, con
     demonstrated failure is an assertion; with one it is evidence.
     """
     return [
-        cluster.binary(member, "llama-server"),
+        cluster.binary("llama-server"),
         "-m", model_file,
         "-c", str(context),
         "-ngl", "999",
@@ -241,9 +256,13 @@ def solo_probe_command(cluster: Cluster, member: Member, model_file: str, *, con
 
 
 def llama_bench_command(cluster: Cluster, member: Member, model_file: str, *, repetitions: int = 3) -> list[str]:
-    """Calibration probe behind SCH-1. Measured throughput, never a spec sheet."""
+    """Calibration probe behind SCH-1. Measured throughput, never a spec sheet.
+
+    `member` is kept for the same reason as in rpc_worker_command: the result is
+    run on one specific node and the caller needs to keep track of which.
+    """
     return [
-        cluster.binary(member, "llama-bench"),
+        cluster.binary("llama-bench"),
         "-m", model_file,
         "-p", "512",
         "-n", "128",
