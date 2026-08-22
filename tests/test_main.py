@@ -1,16 +1,63 @@
+import asyncio
+import json
+import time
+
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from ctl.main import app, seed_registry
+from ctl.main import JOB_QUEUE, app, seed_registry
 from ctl.mock import MOCK_POOL_SECRET, reset_mock_state
 
-client = TestClient(app)
+client: TestClient
+
+
+@pytest.fixture(scope="module", autouse=True)
+def run_control_plane():
+    global client
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {
+                    "node": request.url.host,
+                    "kind": body["kind"],
+                },
+            },
+        )
+
+    original_client = JOB_QUEUE.client
+    asyncio.run(original_client.aclose())
+
+    mock_node_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    JOB_QUEUE.client = mock_node_client
+    JOB_QUEUE.owns_client = False
+
+    with TestClient(app) as running_client:
+        client = running_client
+        yield
+
+    asyncio.run(mock_node_client.aclose())
 
 
 @pytest.fixture(autouse=True)
 def reset_state():
     reset_mock_state()
     seed_registry()
+
+    with JOB_QUEUE.lock:
+        JOB_QUEUE.jobs.clear()
+        JOB_QUEUE.fanouts.clear()
+        JOB_QUEUE.assigned_nodes.clear()
+        JOB_QUEUE.tasks.clear()
+        JOB_QUEUE.semaphores.clear()
+        JOB_QUEUE.in_flight.clear()
+        JOB_QUEUE.events.clear()
+        JOB_QUEUE.next_sequence = 1
 
     yield
 
@@ -116,10 +163,20 @@ def test_create_and_retrieve_job():
     assert created["fanout"] == 2
     assert len(created["assigned_nodes"]) == 2
 
-    get_response = client.get(f"/api/jobs/{created['id']}")
+    for _ in range(100):
+        get_response = client.get(f"/api/jobs/{created['id']}")
+        retrieved = get_response.json()
+
+        if retrieved["status"] in {"done", "failed"}:
+            break
+
+        time.sleep(0.005)
 
     assert get_response.status_code == 200
-    assert get_response.json() == created
+    assert retrieved["id"] == created["id"]
+    assert retrieved["status"] == "done"
+    assert retrieved["fanout"] == 2
+    assert retrieved["result"]["errors"] == []
     assert client.get("/api/jobs/missing").status_code == 404
 
 
@@ -175,13 +232,15 @@ def test_feed_exposes_all_four_frame_types():
         topology = websocket.receive_json()
         frames_by_type: dict[str, dict] = {}
 
-        # Several registry events may arrive before the flow frame.
-        for _ in range(10):
+        for _ in range(30):
             frame = websocket.receive_json()
             frame_type = frame.get("type")
 
-            if frame_type in {"metrics", "event", "flow"}:
+            if frame_type in {"metrics", "event"}:
                 frames_by_type.setdefault(frame_type, frame)
+
+            if frame_type == "flow" and frame.get("job_id") == created_job["id"]:
+                frames_by_type["flow"] = frame
 
             if {"metrics", "event", "flow"} <= frames_by_type.keys():
                 break
