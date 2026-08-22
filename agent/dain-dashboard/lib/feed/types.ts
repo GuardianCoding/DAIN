@@ -16,8 +16,28 @@ export type TopologyFrame = {
   nodes: NodeInfo[];
 };
 
+// Mirrors contracts.NodeMetrics. Unlike NodeProfile these are sampled live —
+// ram_free_mb here is what the node has free RIGHT NOW, whereas the same-named
+// field on a topology node is frozen at whatever it reported when it joined.
+export type NodeMetrics = {
+  node_id: string;
+  timestamp: number; // unix seconds
+  cpu_percent: number;
+  ram_free_mb: number;
+  gpu_percent: number | null;
+  vram_free_mb: number | null;
+  jobs_running?: number;
+};
+
+// ctl's TelemetryFanIn.frame(). It DOES set "type": "metrics" itself — the
+// provider's old note claiming otherwise was wrong. `history` carries up to 60
+// samples per node on every frame; we deliberately keep only `nodes`.
 export type MetricsFrame = {
-  type: "metrics"; // adjust if get_metrics() omits "type" — see FeedProvider note
+  type: "metrics";
+  nodes?: NodeMetrics[];
+  history?: Record<string, NodeMetrics[]>;
+  llama?: Record<string, number>;
+  errors?: Record<string, string>; // node_id -> last poll failure
   [key: string]: unknown;
 };
 
