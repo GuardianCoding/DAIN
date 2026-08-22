@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from contracts import NodeMetrics, NodeProfile
 from node.auth import sign_join_challenge, verify_job_request
 from node.discovery import advertise_node, discover_control_plane
+from node.bench import BenchUnavailableError, LocalBench
 from node.index import EmbeddingUnavailableError, IndexNotReadyError, LocalFileIndex
 from node.infer import InferenceUnavailableError, LocalInference
 from node.sandbox import CommandSandbox, SandboxExecutionError, SandboxRejected
@@ -295,6 +296,7 @@ class NodeAgent:
     )
     sandbox: CommandSandbox = field(default_factory=CommandSandbox.from_environment)
     inference: LocalInference = field(default_factory=LocalInference.from_environment)
+    bench: LocalBench = field(default_factory=LocalBench.from_environment)
 
     @property
     def join_url(self) -> str:
@@ -502,11 +504,11 @@ app = FastAPI(title="DAIN Node Agent", lifespan=lifespan)
 
 class LocalJobRequest(BaseModel):
     job_id: str = Field(min_length=1)
-    # "infer" belongs here even though ctl has always mapped infer -> /infer.
-    # While it was missing, a dispatched infer job was rejected by request
-    # validation before routing ever happened, so adding the route alone would
-    # not have been enough. "bench" stays absent because /bench does not exist.
-    kind: Literal["exec", "index", "search", "infer"]
+    # Must stay in step with ctl.queue.DEFAULT_ENDPOINTS. A kind ctl can
+    # dispatch but this Literal omits is rejected by request validation before
+    # routing ever happens — which is why /infer and /bench each needed the
+    # Literal widened as well as a route added.
+    kind: Literal["exec", "index", "search", "infer", "bench"]
     payload: dict[str, Any] = Field(default_factory=dict)
     shard_index: int = Field(ge=0)
     shard_count: int = Field(ge=1)
@@ -539,6 +541,7 @@ def configure(
     search_index: LocalFileIndex | None = None,
     sandbox: CommandSandbox | None = None,
     inference: LocalInference | None = None,
+    bench: LocalBench | None = None,
 ) -> NodeAgent:
     """Install the agent state the routes and the lifespan read.
 
@@ -554,6 +557,7 @@ def configure(
         search_index=search_index or LocalFileIndex.from_environment(),
         sandbox=sandbox or CommandSandbox.from_environment(),
         inference=inference or LocalInference.from_environment(),
+        bench=bench or LocalBench.from_environment(),
     )
     app.state.agent = agent
     return agent
@@ -596,6 +600,9 @@ async def metrics() -> str:
         f"# HELP node_infer_up 1 when this node has an inference backend\n"
         f"# TYPE node_infer_up gauge\n"
         f"node_infer_up{label} {int(agent.inference.running)}\n"
+        f"# HELP node_bench_available 1 when llama-bench and a model are present\n"
+        f"# TYPE node_bench_available gauge\n"
+        f"node_bench_available{label} {int(agent.bench.available)}\n"
     )
 
 
@@ -720,6 +727,34 @@ async def infer(request: LocalJobRequest) -> dict[str, Any]:
         # No backend configured, still loading, or llama-server died. 503 so
         # the queue's retry treats it as transient and tries another node,
         # matching how /index reports a missing embedding model.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "result": {
+            "node_id": agent.profile.id,
+            "shard_index": request.shard_index,
+            "shard_count": request.shard_count,
+            **result,
+        },
+    }
+
+
+@app.post("/bench")
+async def bench(request: LocalJobRequest) -> dict[str, Any]:
+    agent = authenticated_agent(request)
+    if request.kind != "bench":
+        raise HTTPException(status_code=422, detail="kind must be bench")
+
+    try:
+        result = await agent.bench.run(request.payload)
+    except ValueError as exc:
+        # A bad repetitions/prompt_tokens/gen_tokens — the caller's mistake,
+        # and retrying it on another node would fail identically.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except BenchUnavailableError as exc:
+        # No binary, no model, or the run failed. 503 so the queue's retry
+        # moves the shard to a node that does have a build.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return {

@@ -42,12 +42,18 @@ const KIND_OPTIONS: {
   { id: "bench", label: "Bench", hint: "Run llama-bench, record numbers", icon: Gauge },
 ];
 
-// The node agent serves /health /profile /metrics /index /search /exec /infer.
-// Only /bench is still mapped by the queue without being served, so it 404s.
-const UNIMPLEMENTED_KINDS: JobKind[] = ["bench"];
+// Every kind the queue can dispatch is now served by the node agent:
+// /health /profile /metrics /index /search /exec /infer /bench.
+const UNIMPLEMENTED_KINDS: JobKind[] = [];
 
 const MAX_TOKEN_OPTIONS = [64, 128, 256, 512];
 const DEFAULT_MAX_TOKENS = 256; // matches node/infer.py
+
+// Defaults mirror node/bench.py, which mirrors llama_bench_command — the
+// calibration probe and the INF-6 measurement have to be the same benchmark
+// or their numbers cannot be compared.
+const REPETITION_OPTIONS = [1, 3, 5];
+const DEFAULT_REPETITIONS = 3;
 
 const FANOUT_OPTIONS = [1, 2, 3, 4, 5];
 const MAX_PROMPT_CHARS = 8000; // ~2k tokens, §6.3 cap
@@ -107,13 +113,16 @@ export default function CreateJob() {
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(DEFAULT_SEARCH_LIMIT);
   const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS);
+  const [repetitions, setRepetitions] = useState(DEFAULT_REPETITIONS);
   const [fanout, setFanout] = useState(1);
   const [nodeId, setNodeId] = useState("auto");
   const [state, setState] = useState<SubmitState>("idle");
   const [errorDetail, setErrorDetail] = useState("");
 
+  // bench still fans out — benchmarking every node at once is the point — but
+  // it takes no prompt: llama-bench generates its own synthetic tokens.
   const canFanout = kind === "infer" || kind === "bench";
-  const usesPrompt = kind === "infer" || kind === "bench";
+  const usesPrompt = kind === "infer";
   const isUnimplemented = UNIMPLEMENTED_KINDS.includes(kind);
 
   const argv = tokenizeCommand(command);
@@ -127,9 +136,13 @@ export default function CreateJob() {
         return { query: query.trim(), limit };
       case "index":
         return {};
+      case "bench":
+        // prompt_tokens/gen_tokens are left to the node so every result is
+        // comparable with the SCH-1 calibration probe by default.
+        return { repetitions };
       default:
-        // infer and bench. max_tokens must be an int — node/infer.py rejects
-        // a string with 422 rather than coercing it.
+        // infer. max_tokens must be an int — node/infer.py rejects a string
+        // with 422 rather than coercing it.
         return { prompt, max_tokens: maxTokens };
     }
   }
@@ -140,7 +153,7 @@ export default function CreateJob() {
     if (state === "queued") return false;
     if (kind === "exec") return argv.length > 0;
     if (kind === "search") return query.trim().length > 0;
-    if (kind === "index") return true;
+    if (kind === "index" || kind === "bench") return true;
     return prompt.trim().length > 0 && !overCap;
   }
 
@@ -285,6 +298,34 @@ export default function CreateJob() {
               </div>
             </div>
           </>
+        )}
+
+        {kind === "bench" && (
+          <div className={styles.field}>
+            <div className={styles.fieldRow}>
+              <span className={styles.fieldLabel}>Repetitions</span>
+              <span className={styles.muted}>512 prompt / 128 gen tokens</span>
+            </div>
+            <div className={styles.pillRow}>
+              {REPETITION_OPTIONS.map((n) => (
+                <button
+                  type="button"
+                  key={n}
+                  className={styles.pillOption}
+                  data-active={repetitions === n}
+                  onClick={() => setRepetitions(n)}
+                >
+                  {n}×
+                </button>
+              ))}
+            </div>
+            <span className={styles.muted}>
+              Runs llama-bench on the node and reports measured prefill and
+              decode tok/s. Needs a model on that machine — set DAIN_BENCH_MODEL
+              (or DAIN_INFER_MODEL), else the node answers 503. Fan out to
+              benchmark the whole pool at once; a cold load can take minutes.
+            </span>
+          </div>
         )}
 
         {kind === "index" && (
