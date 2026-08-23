@@ -41,11 +41,13 @@ export const navigation: NavItem[] = [
   
 ];
 
-export const secondaryNavigation: NavItem[] = [
-  {
-    label: "Settings",
-    href: "/settings",
-    icon: Settings,
-    description: "Configure D.A.I.N",
-  },
-];
+
+// Placeholder, settings page can be updated later with authentication or whatever
+// export const secondaryNavigation: NavItem[] = [
+//   {
+//     label: "Settings",
+//     href: "/settings",
+//     icon: Settings,
+//     description: "Configure D.A.I.N",
+//   },
+// ];

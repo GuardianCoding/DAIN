@@ -64,8 +64,11 @@ export default function Sidebar() {
             ))}
           </div>
         </div>
-
-        <div className={styles.section}>
+        
+        {/*
+        Placeholder for settings. can be uncommented if we add actual config options
+        */}
+        {/* <div className={styles.section}>
           <span className={styles.sectionLabel}>System</span>
 
           <div className={styles.navList}>
@@ -73,7 +76,7 @@ export default function Sidebar() {
               <NavLink key={item.href} item={item} />
             ))}
           </div>
-        </div>
+        </div> */}
       </nav>
 
       <div className={styles.footer}>
