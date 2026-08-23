@@ -19,6 +19,10 @@ import {
   Zap,
   Activity,
   Briefcase,
+  Gpu,
+  CircuitBoard,
+  PcCase,
+  SquareActivity,
 } from "lucide-react";
 
 import { useNodes, type LiveNode } from "../../lib/feed/useNodes";
@@ -77,7 +81,7 @@ export default function Dashboard() {
           </h1>
         </div>
         <span className={styles.headerStatus} data-connected={connected}>
-          <Activity size={13} />
+          <SquareActivity size={13} />
           {connected ? `${rows.length} live` : "feed offline"}
         </span>
       </header>
@@ -106,7 +110,7 @@ export default function Dashboard() {
               <div className={styles.cardTop}>
                 <div className={styles.nodeIdentity}>
                   <span className={styles.nodeIcon}>
-                    {node.gpu ? <MonitorCog size={17} /> : <Cpu size={17} />}
+                    <PcCase size={17} /> 
                   </span>
                   <span className={styles.nodeId}>{node.id}</span>
                 </div>
@@ -175,7 +179,7 @@ export default function Dashboard() {
 
                 <div className={styles.statRow}>
                   <span className={styles.statLabel}>
-                    <MonitorCog size={14} />GPU
+                    <Gpu size={14} />GPU
                   </span>
                   <span className={styles.statValue}>
                     {node.gpu ? (
@@ -207,7 +211,7 @@ export default function Dashboard() {
                 </div>
 
                 <div className={styles.statRow}>
-                  <span className={styles.statLabel}><Zap size={14} />Backend</span>
+                  <span className={styles.statLabel}><CircuitBoard size={14} />Backend</span>
                   <span className={styles.badge}>
                     {(node.backend as string) ?? "—"}
                   </span>
