@@ -245,8 +245,10 @@ async def search_files(client: DainClient, arguments: dict[str, Any]) -> str:
 
 async def run_command(client: DainClient, arguments: dict[str, Any]) -> str:
     argv = arguments.get("argv")
-    if not isinstance(argv, list) or not argv or not all(
-        isinstance(value, str) for value in argv
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(value, str) for value in argv)
     ):
         return (
             "run_command needs 'argv': a list of strings, the program first. "

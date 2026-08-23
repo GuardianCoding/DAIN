@@ -3,7 +3,9 @@
 DAIN turns a small group of ordinary computers into one addressable pool for
 model inference, jobs, memory and files. A control plane holds the registry,
 job queue and telemetry; node agents join over mDNS and serve work; a Next.js
-dashboard watches the whole thing live.
+dashboard watches the whole thing live; and an agent sits on top whose tools
+*are* the cluster — it answers "which machine has the most free memory?" by
+reading the live registry, not by guessing.
 
 Requirements: Python 3.12+, `uv`, and Node 20+ for the dashboard.
 
@@ -29,6 +31,13 @@ npm run dev                    # http://localhost:3000
 **Leave it unset for any real cluster** — otherwise ctl advertises `gpu-01`,
 `office-01`, `office-02` and `mac-01` whether or not those machines exist, and
 a node that genuinely joins is buried among fakes that never go offline.
+
+The fake nodes have no agent listening on `:9100`, so jobs dispatched to them
+fail with connection errors. That is the correct result, and it exercises the
+error paths; for work that has to actually run, join a real node.
+
+The agent needs a `llama-server` as well as ctl, so it is not part of this
+two-terminal start — see [The agent](#the-agent).
 
 ---
 
@@ -60,12 +69,34 @@ State is in memory: restarting ctl resets nodes, jobs and telemetry history.
 | `POST` | `/api/nodes/join/challenge` | One-use, 30-second join nonce. |
 | `POST` | `/api/nodes/join` | Verifies the nonce HMAC, registers, returns a short-lived bearer token. |
 | `DELETE` | `/api/nodes/{id}` | Removes a node; `204` or `404`. |
-| `GET` | `/api/plan?model=...` | **Still the deterministic mock** — see Known gaps. |
+| `GET` | `/api/plan?model=&context=&slots=` | The real scheduler over live membership. `404` unknown model, `503` uncalibrated pool or missing KV geometry. |
 | `POST` | `/api/jobs` | Queues a job and fans it out. |
 | `GET` | `/api/jobs/{id}` | Stored job or `404`. |
 | `GET` | `/api/metrics` | Latest node and llama-server metrics, 60-sample histories, polling errors. |
 | `POST` | `/api/race` | Deterministic serial or fan-out result. |
 | `WS` | `/feed` | Streams `topology`, `metrics`, `event` and `flow` frames. |
+
+### Placement
+
+`GET /api/plan` runs `sched.plan()` against whoever is actually alive.
+
+```bash
+curl 'http://127.0.0.1:8000/api/plan?model=castoff&context=8192&slots=1'
+```
+
+`context` and `slots` are parameters because the KV cache scales with both, and
+**they must match what `llama_server_command()` is launched with.** Plan at 8k
+and launch at 128k × 4 and the split is wrong by 64×, silently.
+
+Pass the **key** from `infer/models.toml`. Roles are accepted as aliases and
+canonicalised, but the key is what reaches `Assignment.model_id`. Three models
+(`working`, `mtp`, `working_spare`) have no KV geometry yet and return `503`
+naming what to read off the GGUF header — see Known gaps.
+
+A `503` saying `no node has a measured tg_tok_s` means the pool has not
+calibrated. Nodes measure themselves with `llama-bench` at start; one with no
+`DAIN_BENCH_MODEL` or `DAIN_INFER_MODEL` joins uncalibrated and cannot be
+placed, though it still serves `exec`, `index` and `search`.
 
 ---
 
@@ -122,13 +153,19 @@ The queue dispatches each kind to a route on the node agent. **Each takes a
 different payload**, and the node validates it — a wrong shape is a `422`, not
 a silent no-op.
 
-| Kind | Node route | Payload | Notes |
-| --- | --- | --- | --- |
-| `exec` | `/exec` | `{"argv": ["uname","-a"]}` | bubblewrap-sandboxed. Also `cwd`, `timeout_s`. |
-| `index` | `/index` | `{}` | Re-scans `DAIN_INDEX_ROOT`. `503` if the embedding cache is missing. |
-| `search` | `/search` | `{"query": "...", "limit": 5}` | `409` until `index` has run on that node. |
-| `infer` | `/infer` | `{"prompt": "...", "max_tokens": 256}` | Needs an inference backend — see below. |
-| `bench` | `/bench` | `{"repetitions": 3}` | Runs `llama-bench`. Needs a GGUF on the node. |
+| Kind | Node route | Payload | Dispatch timeout | Notes |
+| --- | --- | --- | --- | --- |
+| `exec` | `/exec` | `{"argv": ["uname","-a"]}` | 90 s | bubblewrap-sandboxed. Also `cwd`, `timeout_s`. |
+| `index` | `/index` | `{}` | 30 s | Re-scans `DAIN_INDEX_ROOT`. `503` if the embedding cache is missing. |
+| `search` | `/search` | `{"query": "...", "limit": 5}` | 30 s | `409` until `index` has run on that node. |
+| `infer` | `/infer` | `{"prompt": "...", "max_tokens": 256}` | 540 s | Needs an inference backend — see below. |
+| `bench` | `/bench` | `{"repetitions": 3}` | 960 s | Runs `llama-bench`. Needs a GGUF on the node. |
+
+**The timeouts are derived, not chosen.** Each is the node's own ceiling for
+that kind plus a margin (`ctl.queue.DEFAULT_TIMEOUTS_S`). Undercut one and a
+`ReadTimeout` is indistinguishable from a dead node: the queue retries, then
+reassigns the same payload to every remaining machine, so one slow generation
+becomes the same prompt running on the whole pool and returning nothing.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/jobs \
@@ -169,6 +206,12 @@ puts layers on the wrong machines.
 
 Pass the **key** from `infer/models.toml` (`castoff`), never the role
 (`castoff_capacity`) — the key is the directory name.
+
+The command includes **`--jinja`**, which makes llama.cpp use the GGUF's own
+chat template. Without it llama.cpp substitutes a built-in template carrying no
+tool-call grammar, and the model replies with prose *describing* the tool call
+it would like to make. Everything in [The agent](#the-agent) depends on it.
+`--placement` uses `GET /api/plan` instead of llama.cpp's `--fit on`.
 
 ```bash
 curl http://gpu-01:8080/v1/chat/completions \
@@ -211,6 +254,79 @@ comparable. `node.bench.measure()` is the reusable entry point for SCH-1.
 
 ---
 
+## The agent
+
+An agent whose tool surface is the pool itself. Ask it which machine has the
+most free memory and it answers *correctly*, because the tool is the live
+registry rather than a guess.
+
+```bash
+./scripts/run_agent.py                                    # interactive
+./scripts/run_agent.py --once "which machine is busiest?"
+./scripts/run_agent.py --tools                            # list the tools
+```
+
+It needs **two endpoints, and they are not the same one**:
+
+| | Where | What for |
+| --- | --- | --- |
+| Thinking | the head, `:8080` | A direct `llama-server` call. No queue involved. |
+| Acting | ctl, `:8000` | Every tool call becomes a job. |
+
+Mixing those up gives you a loop that queues a job to think about queueing a
+job. The payoff of the split: because tool calls are ordinary jobs, they emit
+`flow` and `event` frames on `/feed`, so **the dashboard already draws the
+agent working** without anyone writing visualisation code.
+
+| Variable | Effect |
+| --- | --- |
+| `DAIN_CTL` | Control plane `host:port` (default `127.0.0.1:8000`). |
+| `DAIN_AGENT_ENDPOINT` | llama-server head `host:port` (default `127.0.0.1:8080`). |
+| `DAIN_AGENT_MODEL` | Model name sent to llama-server, which ignores it. |
+
+### The tools
+
+| Tool | Backed by | Notes |
+| --- | --- | --- |
+| `cluster_status()` | `/api/nodes` + `/api/metrics` | Merged. Prefers live telemetry over the join-time profile. |
+| `plan_placement(model)` | `/api/plan` | How the scheduler would split a model, and why. Plans only. |
+| `search_files(query)` | `search` job, fanned out | Every machine searches its own disk; hits come back `node:path`. |
+| `run_command(argv, node)` | `exec` job | Sandboxed. Allowlist imported from `node.sandbox`, not copied. |
+| `ask_pool(prompts)` | N pinned `infer` jobs | One prompt per machine, concurrently. |
+
+Three behaviours worth knowing, each of them deliberate:
+
+- **Tools return prose, not JSON.** A 20B model reading `ram_free=10.0GiB` is
+  markedly more reliable than the same model parsing an object and picking the
+  right key.
+- **`call_tool` never raises.** A `503` is the normal case — nodes calibrate,
+  models load, indexes go cold — so the reason comes back as an ordinary tool
+  result for the model to read and adapt to. The `503` texts were written to be
+  readable for exactly this.
+- **Turns are capped at six.** Small models will call the same tool five times.
+  Past the cap it says it could not determine the answer rather than guessing.
+  An identical repeated call is answered from the first result.
+
+`ask_pool` sends N separate single-prompt jobs rather than one fan-out job.
+`ctl.queue._split_payload` shards on a `tasks` list, but `/infer` reads
+`payload["prompt"]` and `422`s without it, so the sharded shape fails today.
+Pinning each job to a named node also stops the least-busy ranking landing
+every prompt on the same machine.
+
+### The showdown page
+
+```bash
+python3 -m http.server 8123 --directory agent
+# then open http://127.0.0.1:8123/showdown.html?ctl=gpu-01:8000&head=gpu-01:8080
+```
+
+The same prompt, at the same time, on one ordinary node running the 4B replica
+versus the whole pool running a model no single machine here can hold. No build
+step and no framework on purpose — the dashboard is the thing that breaks at
+3am. The left pane goes through ctl as a job, so it also appears on `/feed`.
+
+---
+
 ## Installing a node
 
 ```bash
@@ -227,8 +343,22 @@ Nodes discover ctl over mDNS. Set `DAIN_CTL=host:8000` only when multicast is
 unavailable. The secret lives in `/etc/dain/node.env` mode `0600`, never in the
 unit file or repository.
 
+**Set `DAIN_NODE_ID`.** It defaults to `hostname -s`, and the pool's names are
+not hostnames: `serve_head.py --head` defaults to `gpu-01`, `os_class_map()`
+joins `cluster.toml`'s `[[planning.nodes]]` to live membership by id, and the
+demo script says these names out loud. A node that joins as its hostname has no
+entry in that table. Worse, hostnames are not guaranteed unique — two machines
+here answer to `password3`, and the registry keys on id, so the second to join
+would silently replace the first.
+
+```bash
+DAIN_NODE_ID=office-01 DAIN_FABRIC_IFACE=enp1s0 \
+  DAIN_POOL_SECRET='...' sudo -E ./scripts/install_node.sh
+```
+
 | Variable | Effect |
 | --- | --- |
+| `DAIN_NODE_ID` | This node's id in the pool. **Set it** — see above. |
 | `DAIN_CTL` | Control plane `host:port`, when mDNS is unavailable. |
 | `DAIN_FABRIC_IFACE` | Interface to report and bind `rpc-server` to. |
 | `DAIN_LLAMA_BIN` | llama.cpp binary directory (default `/opt/dain/llama.cpp/build/bin`). |
@@ -294,7 +424,7 @@ ctl/registry.py           node registry, heartbeats, offline sweep, replan event
 ctl/queue.py              async job queue, fan-out, sharding, HMAC-signed dispatch
 ctl/telemetry.py          telemetry fan-in; scrapes node :9100 and llama-server :8080
 ctl/auth.py               request signing
-ctl/mock.py               deterministic mock — still backs GET /api/plan
+ctl/mock.py               deterministic fixtures for DAIN_MOCK_NODES and /api/race
 
 node/dain_node.py         node agent :9100; mDNS join, heartbeat, supervises rpc-server
 node/infer.py             /infer backend — supervises or forwards to llama-server
@@ -304,17 +434,24 @@ node/sandbox.py           bubblewrap-isolated /exec
 node/discovery.py         mDNS
 node/auth.py              verifies controller signatures
 
-sched/plan.py             assign-by-speed then repair. Correct. Not wired in.
-sched/cost.py             pure cost/memory maths
+sched/plan.py             assign-by-speed then repair; behind GET /api/plan
+sched/cost.py             pure cost/memory maths (includes COMPUTE_OVERHEAD_MB)
 infer/models.toml         the model ladder — 8 models by role and download priority
 infer/launch.py           pure llama.cpp command builders (returns argv, runs nothing)
+infer/spec.py             scheduler_spec() — bridges the ladder to sched.plan()
 infer/memory.py           usable memory, KV cache, capacity_report()
 infer/bench.py            benchmark record schema (benchmarks.csv)
 
+agent/client.py           the only thing that speaks HTTP to ctl; submit-and-poll
+agent/tools.py            tool definitions + the ctl calls behind them
+agent/fanout.py           ask_pool — one prompt per machine, concurrently
+agent/loop.py             the conversation loop: prompt -> tool calls -> answer
+agent/showdown.html       one node vs the pool, side by side. No build step.
 agent/dain-dashboard/     Next.js 16 + React 19 dashboard
   lib/config.ts           the only reader of NEXT_PUBLIC_*
   lib/feed/               one WebSocket for the whole app, accumulated state
 
+scripts/run_agent.py          talk to the pool; the agent's operator entry point
 scripts/serve_head.py         start the pipeline head across live membership
 scripts/build_llama.sh        two builds on the head from one commit
 scripts/distribute_llama.sh   push binaries to workers, verify all nodes
@@ -331,25 +468,41 @@ scripts/loadtest_node.sh      known-level CPU load, to prove the telemetry path
 ## Checks
 
 ```bash
-uv run ruff format --check ctl tests
-uv run ruff check ctl tests
-uv run pytest
+uv run pytest                             # 457 passed
+uv run ruff check agent ctl sched         # clean
+uv run ruff format --check agent ctl      # clean
 ```
+
+**Neither lint target is clean repo-wide, and the difference is historical, not
+a regression.** `uv run ruff check .` reports 10 findings across `infer/`,
+`node/`, `scripts/` and `tests/`; `ruff format --check .` would reformat 16
+files in those same areas, which were written in a wider style than `ruff
+format` produces. Both are worth clearing, but doing so is a large diff
+touching files unrelated to whatever change is in flight, so the commands above
+are scoped to the directories that currently pass. Widen them as areas are
+cleaned up.
 
 ---
 
 ## Known gaps
 
-- **`GET /api/plan` still returns the mock.** `sched/plan.py` is finished but
-  unwired: every node reports `tg_tok_s = 0.0`, so the real scheduler raises
-  `no node has a measured tg_tok_s`. `node.bench.measure()` now produces
-  exactly that number — wiring it at node start (SCH-1) is what unblocks this.
+- **Three models cannot be planned.** `working`, `mtp` and `working_spare` have
+  `total_layers` but no entry in `infer.spec.KV_GEOMETRY`, so `GET /api/plan`
+  returns `503` naming what to read off the GGUF header. `working` is most of
+  the demo. `calibration`, `replica`, `castoff`, `headline` and `embed` plan
+  fine.
+- **Every KV geometry that exists is `source="estimated"`.**
+  `infer.spec.unverified_models()` lists them. They come from spec sheets, not
+  from a loader log, so any capacity number derived from them is an estimate.
+- **The agent has not been run against a real model.** Its plumbing is tested
+  end to end against a stub that emits well-formed tool calls. Whether
+  gpt-oss-20b actually emits structured calls through llama.cpp's `--jinja`
+  path is unverified — check `llama-server --help | grep jinja` on the pinned
+  build, then watch for a `[tool]` line from `run_agent.py`.
 - **Nothing starts the pipeline head automatically.** `serve_head.py` is run by
   hand on the head node, by design.
 - **Control-plane state is in memory.** Restarting resets nodes, jobs and
   telemetry.
 - **The pool secret is development-only authentication.** Production auth and
   durable state are out of scope.
-- **`cluster.toml` `pinned_commit`** may still be `UNVERIFIED`. llama.cpp's RPC
-  protocol has no version negotiation, so nodes built from different commits
-  connect happily and then hang or return noise. `serve_head.py` warns.
+- **`ruff format` fails on 16 pre-existing files.** See Checks.

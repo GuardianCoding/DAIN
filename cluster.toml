@@ -130,8 +130,21 @@ memory_gb = 11
 # capacity_report() refuses to bless a claim built from unverified numbers.
 # ---------------------------------------------------------------------------
 
+# The `id` is the DAIN node id, NOT the machine's hostname. Nodes are installed
+# with DAIN_NODE_ID set (see scripts/install_node.sh) precisely so the pool has
+# stable, meaningful names: serve_head.py --head defaults to gpu-01, os_class_map()
+# joins this table to live membership by id, and the demo script says them out
+# loud. A node left to default to `hostname -s` joins under a name nothing here
+# recognises, and os_class_map() then has no entry for it.
+#
+# Hostnames are recorded per entry below only so an operator can tell which box
+# is which. Two of them collide — `password3` is both Liam's PC and the NUC —
+# which is the other reason ids cannot be hostnames: the registry keys on id, so
+# the second machine to join would silently replace the first.
+
 [[planning.nodes]]
-id = "main"
+id = "gpu-01"                                                       # hostname: main
+machine = "Ryzen 5 9600X + RTX 5070 Ti 16 GB, 64 GB. The head node."
 ram_mb = 61880
 vram_mb = 16303
 backend = "cuda"
@@ -139,7 +152,7 @@ os_class = "linux-desktop"
 verified = true
 
 [[planning.nodes]]
-id = "password3"                                                        # Liams pc
+id = "gpu-02"                                                 # hostname: password3
 machine = "Ryzen 5 + RX 5700 XT (card unusable under WSL2 — see below)"
 # ram_mb is the WSL2 VM's allocation, not the host's 16 GB, because that is what
 # /proc/meminfo reports inside WSL and therefore what the node self-reports at
@@ -158,7 +171,8 @@ os_class = "linux-wsl"
 verified = true
 
 [[planning.nodes]]
-id = "password"
+id = "office-01"                                                # hostname: password
+machine = "i7-6700, 8 GB"
 ram_mb = 7157
 vram_mb = 0
 backend = "cpu"
@@ -166,7 +180,10 @@ os_class = "linux-headless"
 verified = true
 
 [[planning.nodes]]
-id = "password1"
+id = "office-02"                                               # hostname: password1
+# The control group. Keep it byte-for-byte identical to office-01 — the A/B in
+# INF-6 only means anything if the two machines differ in nothing but placement.
+machine = "i7-6700, 8 GB"
 ram_mb = 7157
 vram_mb = 0
 backend = "cpu"
@@ -174,7 +191,10 @@ os_class = "linux-headless"
 verified = true
 
 [[planning.nodes]]
-id = "password3"
+id = "nuc-01"                                                  # hostname: password3
+# Headless is what makes this node usable at all: a desktop session on 4 GB
+# leaves too little for a slice worth having. os_class must stay linux-headless.
+machine = "i3-7100U, 4 GB"
 ram_mb = 3255
 vram_mb = 0
 backend = "cpu"

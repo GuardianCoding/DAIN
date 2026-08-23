@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAIN showdown — one PC vs the pool</title>
+<!--
+  The same prompt, run twice, at the same time:
+
+    LEFT   one ordinary office machine running the 4B replica on its own.
+           Fast, and small enough to be wrong.
+    RIGHT  the whole pool running a model no single machine here can hold,
+           through the llama-server head with the others attached over --rpc.
+
+  The point is not that the right-hand side wins. It is that the right-hand
+  side EXISTS: that model does not fit on any one of these computers, and the
+  left-hand pane is the honest baseline showing what one of them alone can do.
+
+  Standalone on purpose. No build step, no npm, no framework — open the file, or
+  serve the directory, and it works. The Next.js dashboard next door is the
+  thing that can break at 3am; this cannot.
+
+  It needs:
+    ctl   :8000   for the left pane (an infer job pinned to one node, which
+                  also makes it appear on /feed so the dashboard draws it)
+    head  :8080   for the right pane, spoken to directly — the pipeline head
+                  is not a queue job, it is one llama-server
+
+  The left pane needs at least one node with $DAIN_INFER_MODEL set to the 4B
+  replica GGUF. Without it that node answers 503 and says so, which this page
+  shows rather than hides.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #16181d; --muted: #5c6370;
+    --line: #d8dbe2; --panel: #f6f7f9;
+    --solo: #b4690e; --pool: #1f6feb; --bad: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #e6e8ec; --muted: #9aa1ad;
+      --line: #2b2f38; --panel: #1b1e24;
+      --solo: #e8a33d; --pool: #6ea8fe; --bad: #f2857c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  fieldset {
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; margin: 0 0 16px;
+  }
+  legend { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  input, select, textarea, button {
+    font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
+  }
+  textarea { width: 100%; resize: vertical; min-height: 68px; }
+  button {
+    background: var(--fg); color: var(--bg); border-color: var(--fg);
+    cursor: pointer; font-weight: 600; padding: 9px 18px;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .panes { grid-template-columns: 1fr; } }
+  .pane { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .pane header { padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .pane h2 { margin: 0; font-size: 14px; }
+  .pane .where { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .solo h2 { color: var(--solo); }
+  .pool h2 { color: var(--pool); }
+  .body { padding: 14px; }
+  .answer { white-space: pre-wrap; word-break: break-word; min-height: 90px; }
+  .answer.waiting, .answer.error { color: var(--muted); font-style: italic; }
+  .answer.error { color: var(--bad); font-style: normal; }
+  .stats {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    padding: 9px 14px; border-top: 1px solid var(--line);
+    background: var(--panel); font-variant-numeric: tabular-nums; font-size: 13px;
+  }
+  .stats b { font-weight: 600; }
+  .stats .k { color: var(--muted); }
+  footer { margin-top: 18px; color: var(--muted); font-size: 13px; }
+  code { background: var(--panel); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<h1>One computer, or all of them</h1>
+<p class="sub">The same question, asked twice, at the same time.</p>
+
+<fieldset>
+  <legend>Endpoints</legend>
+  <div class="row">
+    <div>
+      <label for="ctl">Control plane</label>
+      <input id="ctl" size="20" value="127.0.0.1:8000">
+    </div>
+    <div>
+      <label for="head">Pipeline head</label>
+      <input id="head" size="20" value="127.0.0.1:8080">
+    </div>
+    <div>
+      <label for="node">Solo node (left pane)</label>
+      <select id="node"><option value="">loading…</option></select>
+    </div>
+    <div>
+      <label for="tokens">Max tokens</label>
+      <input id="tokens" type="number" min="16" max="2048" value="256" size="5">
+    </div>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Prompt</legend>
+  <textarea id="prompt">Explain, in three sentences, why splitting one large language model across several ordinary computers is harder than just running a smaller model on one of them.</textarea>
+  <div class="row" style="margin-top:10px">
+    <button id="go">Ask both</button>
+    <span id="status" class="sub" style="margin:0"></span>
+  </div>
+</fieldset>
+
+<div class="panes">
+  <section class="pane solo">
+    <header>
+      <h2>One machine, alone</h2>
+      <div class="where" id="solo-where">the 4B replica on a single node</div>
+    </header>
+    <div class="body"><div class="answer waiting" id="solo-answer">waiting</div></div>
+    <div class="stats">
+      <span><span class="k">time</span> <b id="solo-time">—</b></span>
+      <span><span class="k">tok/s</span> <b id="solo-rate">—</b></span>
+    </div>
+  </section>
+
+  <section class="pane pool">
+    <header>
+      <h2>The whole pool</h2>
+      <div class="where" id="pool-where">a model no single machine here can hold</div>
+    </header>
+    <div class="body"><div class="answer waiting" id="pool-answer">waiting</div></div>
+    <div class="stats">
+      <span><span class="k">time</span> <b id="pool-time">—</b></span>
+      <span><span class="k">tok/s</span> <b id="pool-rate">—</b></span>
+    </div>
+  </section>
+</div>
+
+<footer>
+  Left goes through the control plane as a job, so it also appears on
+  <code>/feed</code> and the dashboard draws it. Right talks straight to the
+  head — the pipeline is one <code>llama-server</code>, not a queue job.
+</footer>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const POLL_MS = 300;
+// Above the queue's own 540s ceiling for an infer job, so this gives up only
+// after ctl has, and reports ctl's reason rather than inventing a timeout.
+const JOB_DEADLINE_MS = 600000;
+
+const base = (value) => {
+  const text = value.trim().replace(/\/+$/, "");
+  return /^https?:\/\//.test(text) ? text : `http://${text}`;
+};
+
+const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function show(side, { text, error, ms, rate }) {
+  const answer = $(`${side}-answer`);
+  answer.className = "answer" + (error ? " error" : "");
+  answer.textContent = error || text || "(empty answer)";
+  $(`${side}-time`).textContent = ms == null ? "—" : seconds(ms);
+  $(`${side}-rate`).textContent = rate == null ? "—" : rate.toFixed(1);
+}
+
+function waiting(side, note) {
+  const answer = $(`${side}-answer`);
+  answer.className = "answer waiting";
+  answer.textContent = note;
+  $(`${side}-time`).textContent = "—";
+  $(`${side}-rate`).textContent = "—";
+}
+
+/** ctl's `detail` is written to be read; keep it rather than "request failed". */
+async function detail(response) {
+  try {
+    const body = await response.json();
+    if (body && typeof body.detail === "string") return body.detail;
+  } catch { /* non-JSON body */ }
+  return `HTTP ${response.status}`;
+}
+
+async function loadNodes() {
+  const select = $("node");
+  try {
+    const response = await fetch(`${base($("ctl").value)}/api/nodes`);
+    if (!response.ok) throw new Error(await detail(response));
+    const nodes = (await response.json()).filter(
+      (n) => n.state !== "offline" && n.state !== "joining"
+    );
+    select.innerHTML = "";
+    if (!nodes.length) {
+      select.innerHTML = '<option value="">no nodes joined</option>';
+      return;
+    }
+    for (const node of nodes) {
+      const option = document.createElement("option");
+      option.value = node.id;
+      option.textContent = `${node.id} (${node.backend})`;
+      select.append(option);
+    }
+    // Default to the humblest box, not the GPU: the comparison only says
+    // something if the left pane is a machine nobody would have chosen.
+    const humble = nodes.find((n) => n.backend === "cpu");
+    if (humble) select.value = humble.id;
+    // Clear a previous failure, or a corrected address still reads as broken.
+    $("status").textContent = "";
+  } catch (error) {
+    select.innerHTML = '<option value="">ctl unreachable</option>';
+    $("status").textContent = String(error.message || error);
+  }
+}
+
+async function runSolo(ctl, nodeId, prompt, maxTokens) {
+  if (!nodeId) {
+    return { error: "Pick a node for the left pane (none are joined yet)." };
+  }
+  const started = performance.now();
+
+  const submitted = await fetch(`${ctl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      kind: "infer",
+      payload: { prompt, max_tokens: maxTokens },
+      fanout: 1,
+      node_id: nodeId,
+    }),
+  });
+  if (!submitted.ok) return { error: await detail(submitted) };
+
+  const { id } = await submitted.json();
+  const expires = performance.now() + JOB_DEADLINE_MS;
+
+  while (performance.now() < expires) {
+    const polled = await fetch(`${ctl}/api/jobs/${id}`);
+    if (!polled.ok) return { error: await detail(polled) };
+    const job = await polled.json();
+
+    if (job.status === "done" || job.status === "failed") {
+      const ms = performance.now() - started;
+      const errors = job.result?.errors ?? [];
+      if (errors.length) return { error: errors[0].error, ms };
+      const payload = job.result?.shards?.[0]?.result ?? {};
+      return { text: payload.text, rate: payload.tok_s ?? null, ms };
+    }
+    await sleep(POLL_MS);
+  }
+  return { error: `job ${id} did not finish in time` };
+}
+
+async function runPool(head, prompt, maxTokens) {
+  const started = performance.now();
+  let response;
+  try {
+    response = await fetch(`${head}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: maxTokens,
+        stream: false,
+      }),
+    });
+  } catch (error) {
+    return {
+      error:
+        `No llama-server answering at ${head}. Start the head with ` +
+        `./scripts/serve_head.py --model castoff  (${error.message})`,
+    };
+  }
+  if (!response.ok) return { error: await detail(response) };
+
+  const body = await response.json();
+  const ms = performance.now() - started;
+  const completion = body.usage?.completion_tokens;
+  const rate =
+    body.timings?.predicted_per_second ??
+    (completion ? completion / (ms / 1000) : null);
+  return { text: body.choices?.[0]?.message?.content ?? "", rate, ms };
+}
+
+async function ask() {
+  const prompt = $("prompt").value.trim();
+  if (!prompt) return;
+
+  const ctl = base($("ctl").value);
+  const head = base($("head").value);
+  const nodeId = $("node").value;
+  const maxTokens = Number($("tokens").value) || 256;
+
+  $("go").disabled = true;
+  $("status").textContent = "asking both…";
+  $("solo-where").textContent = nodeId
+    ? `node ${nodeId}, its own copy of the 4B replica`
+    : "no node selected";
+  $("pool-where").textContent = `${head} — the head, with the others over --rpc`;
+  waiting("solo", "thinking");
+  waiting("pool", "thinking");
+
+  // Concurrently and independently: one side failing must still show the other,
+  // and the whole point is that they run at the same time.
+  await Promise.allSettled([
+    runSolo(ctl, nodeId, prompt, maxTokens).then((r) => show("solo", r)),
+    runPool(head, prompt, maxTokens).then((r) => show("pool", r)),
+  ]);
+
+  $("status").textContent = "";
+  $("go").disabled = false;
+}
+
+// The defaults are loopback, but the demo is driven from a laptop against
+// gpu-01. Query parameters make that a bookmark instead of two fields retyped
+// under stage lighting:
+//   showdown.html?ctl=gpu-01:8000&head=gpu-01:8080
+const parameters = new URLSearchParams(location.search);
+for (const field of ["ctl", "head"]) {
+  const supplied = parameters.get(field);
+  if (supplied) $(field).value = supplied;
+}
+
+$("go").addEventListener("click", ask);
+$("ctl").addEventListener("change", loadNodes);
+loadNodes();
+</script>
+</body>
+</html>
