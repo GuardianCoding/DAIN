@@ -4,6 +4,7 @@ import {
   Settings,
   House,
   MessageSquarePlus,
+  Sparkles,
 } from "lucide-react";
 
 export type NavItem = {
@@ -25,6 +26,12 @@ export const navigation: NavItem[] = [
     href: "/dashboard",
     icon: Cpu,
     description: "View connected nodes",
+  },
+  {
+    label: "Agent",
+    href: "/agent",
+    icon: Sparkles,
+    description: "Ask the pool, with the cluster as its tools",
   },
   {
     label: "Create Job",

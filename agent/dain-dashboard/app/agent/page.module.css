@@ -1,0 +1,336 @@
+.stage {
+  min-height: 100vh;
+  background: #0b0d0f;
+  color: #e7e9ea;
+  padding: 40px 32px 80px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto 20px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.kicker {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #6b7378;
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(32px, 5vw, 52px);
+  line-height: 1;
+  letter-spacing: -0.05em;
+}
+
+/* Where it thinks and where it acts are different machines. Showing both is
+   the difference between "the agent is broken" and "the head is not running". */
+.endpoints {
+  text-align: right;
+  font-size: 12px;
+  color: #6b7378;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.endpoints b {
+  color: #9aa1a6;
+  font-weight: 600;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6b7378;
+}
+
+.dot[data-state="up"] {
+  background: #35d07f;
+}
+
+.dot[data-state="down"] {
+  background: #e5534b;
+}
+
+.transcript {
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-bottom: 20px;
+}
+
+.empty {
+  border: 1px dashed #23272b;
+  border-radius: 14px;
+  padding: 28px;
+  color: #6b7378;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.empty h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: #9aa1a6;
+}
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.suggestion {
+  background: #14171a;
+  border: 1px solid #23272b;
+  color: #9aa1a6;
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.suggestion:hover {
+  border-color: #35507a;
+  color: #e7e9ea;
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bubble {
+  border-radius: 14px;
+  padding: 14px 18px;
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.user {
+  align-self: flex-end;
+  max-width: 78%;
+  background: #1b2c4a;
+  border: 1px solid #274064;
+}
+
+.assistant {
+  align-self: flex-start;
+  max-width: 88%;
+  background: #14171a;
+  border: 1px solid #23272b;
+}
+
+.failed {
+  align-self: flex-start;
+  max-width: 88%;
+  background: #1d1315;
+  border: 1px solid #4a2226;
+  color: #f0a9a4;
+}
+
+/* The tool calls are the demo. A reply with no visible work behind it is
+   indistinguishable from the model making the numbers up. */
+.work {
+  align-self: flex-start;
+  max-width: 88%;
+  width: 100%;
+  border: 1px solid #23272b;
+  border-radius: 12px;
+  background: #101315;
+  overflow: hidden;
+}
+
+.workHeader {
+  padding: 8px 14px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #6b7378;
+  border-bottom: 1px solid #1c2023;
+}
+
+.call {
+  border-top: 1px solid #1c2023;
+}
+
+.call:first-of-type {
+  border-top: none;
+}
+
+.callSummary {
+  padding: 9px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  list-style: none;
+  color: #cfd4d7;
+}
+
+.callSummary::-webkit-details-marker {
+  display: none;
+}
+
+.callName {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #7fb0ff;
+}
+
+.callArgs {
+  color: #6b7378;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.callResult {
+  margin: 0;
+  padding: 0 14px 12px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #9aa1a6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.capped {
+  align-self: flex-start;
+  font-size: 12px;
+  color: #d9a441;
+}
+
+.thinking {
+  align-self: flex-start;
+  color: #6b7378;
+  font-size: 13px;
+  font-style: italic;
+}
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+  background: #0b0d0f;
+  padding-top: 12px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.input {
+  flex: 1;
+  background: #14171a;
+  border: 1px solid #23272b;
+  border-radius: 12px;
+  padding: 13px 16px;
+  color: #e7e9ea;
+  font: inherit;
+  font-size: 14px;
+  resize: vertical;
+  min-height: 50px;
+  max-height: 200px;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #35507a;
+}
+
+.send {
+  background: #e7e9ea;
+  color: #0b0d0f;
+  border: none;
+  border-radius: 12px;
+  padding: 14px 20px;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.reset {
+  background: transparent;
+  border: 1px solid #23272b;
+  color: #6b7378;
+  border-radius: 12px;
+  padding: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.reset:hover:not(:disabled) {
+  color: #e7e9ea;
+  border-color: #35507a;
+}
+
+.reset:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+@media (max-width: 700px) {
+  .stage {
+    padding: 28px 16px 60px;
+  }
+
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .endpoints {
+    text-align: left;
+  }
+
+  .user,
+  .assistant,
+  .failed,
+  .work {
+    max-width: 100%;
+  }
+}
