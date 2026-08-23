@@ -97,6 +97,7 @@ def build_members(
     nodes: list[dict[str, Any]],
     head_id: str,
     os_classes: dict[str, str],
+    excluded: frozenset[str] = frozenset(),
 ) -> tuple[Member, ...]:
     """Live membership, head first, workers in a deterministic order.
 
@@ -105,7 +106,14 @@ def build_members(
     two runs a minute apart produce the same split for the same set of nodes,
     which is the only way an A/B comparison means anything.
     """
-    alive = [node for node in nodes if node.get("state") != "offline"]
+    if head_id in excluded:
+        raise HeadError(f"head {head_id!r} cannot also be excluded")
+
+    alive = [
+        node
+        for node in nodes
+        if node.get("state") != "offline" and str(node.get("id")) not in excluded
+    ]
     if not alive:
         raise HeadError("no live nodes — is any node agent running and joined?")
 
@@ -137,6 +145,11 @@ def membership_key(members: tuple[Member, ...]) -> tuple[tuple[str, str], ...]:
     """What --watch compares. Identity and address only: a node's free memory
     moving is not a reason to drop every KV cache in the cluster."""
     return tuple((member.node_id, member.host) for member in members)
+
+
+def excluded_node_ids(value: str) -> frozenset[str]:
+    """Parse the service-friendly comma-separated exclusion list."""
+    return frozenset(node_id.strip() for node_id in value.split(",") if node_id.strip())
 
 
 def resolve_model_file(cluster: Cluster, model_id: str, filename: str | None) -> str:
@@ -274,6 +287,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="use GET /api/plan instead of llama.cpp's --fit on",
     )
     parser.add_argument(
+        "--exclude",
+        default="",
+        metavar="NODE_ID,...",
+        help="omit these node ids from the RPC pool (comma-separated)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="print the command and exit"
     )
     parser.add_argument(
@@ -288,7 +307,8 @@ def plan_command(
     args: argparse.Namespace, cluster: Cluster
 ) -> tuple[list[str], tuple[Member, ...]]:
     ctl = args.ctl or f"{args.head}:{cluster.ctl_port}"
-    members = build_members(fetch_nodes(ctl), args.head, os_class_map())
+    excluded = excluded_node_ids(args.exclude)
+    members = build_members(fetch_nodes(ctl), args.head, os_class_map(), excluded)
     model_file = resolve_model_file(cluster, args.model, args.file)
     placement = fetch_placement(ctl, args.model) if args.placement else None
 
@@ -366,7 +386,12 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             ctl = args.ctl or f"{args.head}:{cluster.ctl_port}"
-            latest = build_members(fetch_nodes(ctl), args.head, os_class_map())
+            latest = build_members(
+                fetch_nodes(ctl),
+                args.head,
+                os_class_map(),
+                excluded_node_ids(args.exclude),
+            )
         except HeadError as exc:
             print(f"membership check failed: {exc}", file=sys.stderr)
             continue

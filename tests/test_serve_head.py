@@ -122,6 +122,20 @@ class TestBuildMembers:
         with pytest.raises(serve_head.HeadError, match="office-01"):
             serve_head.build_members(LIVE, "not-a-node", OS_CLASSES)
 
+    def test_explicitly_excluded_workers_are_not_in_membership(self):
+        members = serve_head.build_members(
+            LIVE,
+            HEAD,
+            OS_CLASSES,
+            frozenset({"office-01"}),
+        )
+
+        assert [member.node_id for member in members] == [HEAD, "nuc-01"]
+
+    def test_head_cannot_be_excluded(self):
+        with pytest.raises(serve_head.HeadError, match="cannot also be excluded"):
+            serve_head.build_members(LIVE, HEAD, OS_CLASSES, frozenset({HEAD}))
+
 
 class TestMembershipKey:
     def test_same_nodes_and_addresses_compare_equal(self):
@@ -239,3 +253,13 @@ class TestArgs:
         # --fit on unless placement is asked for: that is the baseline half of
         # the A/B, and the only thing that works before SCH-1 lands.
         assert args.placement is False
+        assert args.exclude == ""
+
+    def test_exclusions_are_service_friendly(self):
+        args = serve_head.parse_args(
+            ["--model", "castoff", "--exclude", "mac-01, node-104"]
+        )
+
+        assert serve_head.excluded_node_ids(args.exclude) == frozenset(
+            {"mac-01", "node-104"}
+        )

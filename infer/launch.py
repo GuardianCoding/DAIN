@@ -216,7 +216,6 @@ def llama_server_command(
         "-c", str(context),
         "-np", str(slots),
         "-fa", "on",
-        "-ngl", "999",
         # Use the GGUF's own chat template. Recent llama.cpp only parses tool
         # calls out of the model's template, and without --jinja it falls back
         # to a built-in that carries no tool-call grammar: the model then
@@ -233,9 +232,16 @@ def llama_server_command(
         command += ["--rpc", rpc_endpoints(cluster, workers)]
 
     if placement is None:
+        # llama.cpp's auto-fit owns n_gpu_layers. Passing an explicit -ngl at
+        # the same time makes recent builds abort instead of fitting the model
+        # across the available local and RPC devices.
         return command + ["--fit", "on"]
 
     _assert_plan_matches_membership(placement, members)
+    # A scheduler placement is explicit, so all model layers must be eligible
+    # for device offload and the positional tensor split below decides where
+    # they go.
+    command += ["-ngl", "999"]
     ordered = (head, *workers)
     shares = [placement.tensor_split[list(placement.layers).index(m.node_id)] for m in ordered]
     command += ["--tensor-split", ",".join(f"{share:.4f}" for share in shares)]

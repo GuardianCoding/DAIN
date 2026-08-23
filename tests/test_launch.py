@@ -149,6 +149,10 @@ class TestServerCommand:
         command = llama_server_command(cluster, "/m/model.gguf", (HEAD, CPU_WORKER))
         assert command[command.index("--fit") + 1] == "on"
 
+    def test_auto_fit_does_not_also_force_gpu_layers(self, cluster):
+        command = llama_server_command(cluster, "/m/model.gguf", (HEAD, CPU_WORKER))
+        assert "-ngl" not in command
+
     def test_applies_placement_shares_in_member_order(self, cluster):
         # Arrange — placement keyed by node id, deliberately in a different
         # order from membership, to prove ordering is derived and not assumed
@@ -162,6 +166,8 @@ class TestServerCommand:
         command = llama_server_command(cluster, "/m/model.gguf", (HEAD, CPU_WORKER), placement)
 
         # Assert — head share first, then workers in --rpc order
+        assert command[command.index("-ngl") + 1] == "999"
+        assert "--fit" not in command
         assert command[command.index("--tensor-split") + 1] == "0.8000,0.2000"
 
     def test_passes_n_cpu_moe_for_the_head(self, cluster):

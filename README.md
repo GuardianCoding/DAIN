@@ -196,6 +196,7 @@ endpoint**, the head's `:8080`. **The job queue is not involved.**
 ./scripts/serve_head.py --model castoff              # start it
 ./scripts/serve_head.py --model castoff --dry-run    # print the argv first
 ./scripts/serve_head.py --model castoff --watch      # restart on membership change
+./scripts/serve_head.py --model castoff --exclude mac-01,node-104
 ```
 
 It asks ctl who is alive, orders the head first and the workers
@@ -212,6 +213,13 @@ chat template. Without it llama.cpp substitutes a built-in template carrying no
 tool-call grammar, and the model replies with prose *describing* the tool call
 it would like to make. Everything in [The agent](#the-agent) depends on it.
 `--placement` uses `GET /api/plan` instead of llama.cpp's `--fit on`.
+The default auto-fit command deliberately omits `-ngl`: recent llama.cpp builds
+reject an explicit GPU-layer count together with `--fit on`. A scheduler
+placement is explicit and still emits `-ngl 999` with its tensor split.
+
+`--exclude` is a comma-separated safety valve for a worker whose RPC backend is
+unavailable or reports an unusable device. Excluded membership changes do not
+restart a `--watch` process.
 
 ```bash
 curl http://gpu-01:8080/v1/chat/completions \
@@ -371,6 +379,46 @@ Node routes: `/health` `/profile` `/metrics` `/index` `/search` `/exec`
 
 ---
 
+## Persisting the Linux head
+
+`install_head.sh` installs three restart-on-failure systemd services on the
+head machine: `dain-ctl`, its local `dain-node`, and the watched shared
+`dain-head`. The pool secret is stored in `/etc/dain/head.env` with restricted
+permissions rather than embedded in a unit or committed file.
+
+Run it from the checked-out repository after the Python environment, model
+files, and pinned llama.cpp binaries are present:
+
+```bash
+export DAIN_POOL_SECRET='replace-with-the-pool-secret'
+export DAIN_FABRIC_IFACE=enp8s0
+export DAIN_FABRIC_HOST=192.168.50.1
+export DAIN_HEAD_NODE_ID=fedora-test
+export DAIN_MODEL_ID=castoff
+export DAIN_MODEL_FILE=gpt-oss-20b-MXFP4.gguf
+export DAIN_BENCH_MODEL=/srv/dain/models/calibration/Qwen3-0.6B-Q4_K_M.gguf
+
+# Optional: keep a known-incompatible worker out of this model placement.
+export DAIN_HEAD_EXCLUDE=mac-01
+
+sudo -E ./scripts/install_head.sh
+```
+
+The installer waits for `:8000`, `:9100`, and `:8080`, enables all three units
+at boot, and can be rerun to update their configuration. Before installing,
+stop any hand-started process already listening on `:8000`, `:9100`, or
+`:8080`; the installer does not kill an unknown process automatically.
+
+Useful checks:
+
+```bash
+systemctl status dain-ctl dain-node dain-head --no-pager
+journalctl -u dain-head -f
+curl -fsS http://192.168.50.1:8080/health
+```
+
+---
+
 ## Distributed file search
 
 Each node indexes only `DAIN_INDEX_ROOT`. Run an `index` job before searching;
@@ -499,8 +547,9 @@ cleaned up.
   gpt-oss-20b actually emits structured calls through llama.cpp's `--jinja`
   path is unverified — check `llama-server --help | grep jinja` on the pinned
   build, then watch for a `[tool]` line from `run_agent.py`.
-- **Nothing starts the pipeline head automatically.** `serve_head.py` is run by
-  hand on the head node, by design.
+- **The pipeline head is not persistent until installed.** Run
+  `scripts/install_head.sh` on the Linux head; otherwise `serve_head.py` remains
+  an operator-started process.
 - **Control-plane state is in memory.** Restarting resets nodes, jobs and
   telemetry.
 - **The pool secret is development-only authentication.** Production auth and
