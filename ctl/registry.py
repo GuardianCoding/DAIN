@@ -45,6 +45,27 @@ class NodeRegistry:
         self.next_sequence = 1
         self.lock = RLock()
 
+    def _emit(
+        self,
+        event: str,
+        node_id: str,
+        message: str,
+        *,
+        replan_required: bool = False,
+    ) -> RegistryEvent:
+        """Append one event. Callers already hold the lock."""
+        record = RegistryEvent(
+            sequence=self.next_sequence,
+            timestamp=self.wall_clock(),
+            event=event,
+            node_id=node_id,
+            message=message,
+            replan_required=replan_required,
+        )
+        self.events.append(record)
+        self.next_sequence += 1
+        return record
+
     def register(
         self,
         profile: NodeProfile,
@@ -53,11 +74,28 @@ class NodeRegistry:
         with self.lock:
             existing = self.nodes.get(profile.id)
             if existing is not None:
+                # Same id at a new address still moves the --rpc list, and
+                # --tensor-split is positional over it, so a running head is
+                # silently wrong until it restarts. Same address is NOT a
+                # membership change and must stay quiet: restarting the head
+                # would drop every KV cache in the cluster for nothing.
+                previous_host = existing.profile.host
+                moved = previous_host != profile.host
+
                 profile.state = existing.profile.state
                 existing.profile = profile
                 existing.last_heartbeat = self.clock()
                 existing.missed_heartbeats = 0
                 existing.heartbeat_required = heartbeat_required
+
+                if moved:
+                    self._emit(
+                        "readdressed",
+                        profile.id,
+                        f"Node {profile.id} moved from {previous_host} "
+                        f"to {profile.host}",
+                        replan_required=True,
+                    )
                 return existing.profile
 
             profile.state = "joining"
@@ -66,17 +104,15 @@ class NodeRegistry:
                 profile, self.clock(), heartbeat_required=heartbeat_required
             )
 
-            self.events.append(
-                RegistryEvent(
-                    sequence=self.next_sequence,
-                    timestamp=self.wall_clock(),
-                    event="joined",
-                    node_id=profile.id,
-                    message=f"Node {profile.id} joined the cluster",
-                )
+            # Expand invalidates a running head exactly as much as contract:
+            # llama.cpp fixes --rpc at llama-server start, so an arriving node
+            # is unusable until the head restarts.
+            self._emit(
+                "joined",
+                profile.id,
+                f"Node {profile.id} joined the cluster",
+                replan_required=True,
             )
-
-            self.next_sequence += 1
             return profile
 
     def heartbeat(
@@ -103,16 +139,14 @@ class NodeRegistry:
                 record.metrics = metrics
 
             if was_offline:
-                self.events.append(
-                    RegistryEvent(
-                        sequence=self.next_sequence,
-                        timestamp=self.wall_clock(),
-                        event="recovered",
-                        node_id=node_id,
-                        message=f"Node {node_id} recovered",
-                    )
+                # The pool grew back. The head was re-planned without this node
+                # when it went offline, so it needs planning again to use it.
+                self._emit(
+                    "recovered",
+                    node_id,
+                    f"Node {node_id} recovered",
+                    replan_required=True,
                 )
-                self.next_sequence += 1
 
         return record
 
@@ -141,18 +175,14 @@ class NodeRegistry:
 
                 record.profile.state = "offline"
 
-                event = RegistryEvent(
-                    sequence=self.next_sequence,
-                    timestamp=self.wall_clock(),
-                    event="offline",
-                    node_id=node_id,
-                    message=f"Node {node_id} missed its heartbeats",
-                    replan_required=True,
+                emitted_events.append(
+                    self._emit(
+                        "offline",
+                        node_id,
+                        f"Node {node_id} missed its heartbeats",
+                        replan_required=True,
+                    )
                 )
-
-                self.events.append(event)
-                emitted_events.append(event)
-                self.next_sequence += 1
                 replan_nodes.append(node_id)
 
         if self.on_replan is not None:
@@ -171,7 +201,19 @@ class NodeRegistry:
 
     def remove(self, node_id: str) -> bool:
         with self.lock:
-            return self.nodes.pop(node_id, None) is not None
+            if self.nodes.pop(node_id, None) is None:
+                return False
+
+            # DELETE /api/nodes/{id} used to be silent: the topology frame
+            # changed but no event said why, so a consumer watching the feed
+            # saw a node vanish with no reason and no replan signal.
+            self._emit(
+                "removed",
+                node_id,
+                f"Node {node_id} was removed from the cluster",
+                replan_required=True,
+            )
+            return True
 
     def events_after(self, sequence: int) -> list[RegistryEvent]:
         with self.lock:
