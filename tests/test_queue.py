@@ -5,9 +5,13 @@ import httpx
 import pytest
 
 from contracts import NodeMetrics, NodeProfile
-from ctl.queue import JobQueue
+from ctl.queue import TIMEOUT_MARGIN_S, JobQueue
 from ctl.registry import NodeRegistry
 from node.auth import verify_job_request
+from node.bench import BENCH_TIMEOUT_S
+from node.infer import READY_TIMEOUT_S as INFER_READY_TIMEOUT_S
+from node.infer import REQUEST_TIMEOUT_S as INFER_REQUEST_TIMEOUT_S
+from node.sandbox import MAX_TIMEOUT_S as SANDBOX_MAX_TIMEOUT_S
 
 POOL_SECRET = "test-pool-secret"
 
@@ -384,6 +388,76 @@ async def test_dispatches_a_signed_request_with_a_long_index_timeout():
         issued_at=received["issued_at"],
         signature=received["signature"],
     )
+
+    await queue.close()
+    await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload", "node_ceiling_s"),
+    [
+        ("infer", {"prompt": "hello"}, INFER_READY_TIMEOUT_S + INFER_REQUEST_TIMEOUT_S),
+        ("bench", {"repetitions": 3}, BENCH_TIMEOUT_S),
+        ("exec", {"argv": ["ls"]}, SANDBOX_MAX_TIMEOUT_S),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_timeout_exceeds_the_node_ceiling_for_every_slow_kind(
+    kind: str,
+    payload: dict,
+    node_ceiling_s: float,
+):
+    registry = make_registry()
+    read_timeouts: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        read_timeouts.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = JobQueue(registry, pool_secret=POOL_SECRET, client=client)
+    job = await queue.submit(kind, payload, fanout=1)
+    await queue.wait(job.id, timeout=1.0)
+
+    assert read_timeouts == [node_ceiling_s + TIMEOUT_MARGIN_S]
+    assert read_timeouts[0] > node_ceiling_s
+
+    await queue.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_kind_is_not_reassigned_while_the_node_is_still_working():
+    """The stampede this guards against.
+
+    A dispatch timeout below the node's own ceiling does not merely fail: it
+    is indistinguishable from a dead node, so the shard is retried and then
+    reassigned to every remaining node. One slow generation becomes the same
+    prompt running on the whole pool, with nothing returned.
+    """
+    registry = make_registry()
+    add_node(registry, "node-02", jobs_running=1)
+    attempts: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(request.url.host)
+        await asyncio.sleep(0.25)
+        return httpx.Response(200, json={"ok": True, "result": {"text": "hi"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = JobQueue(
+        registry,
+        pool_secret=POOL_SECRET,
+        client=client,
+        timeout_s=0.05,
+        timeout_by_kind={"infer": 5.0},
+    )
+    job = await queue.submit("infer", {"prompt": "hello"}, fanout=1)
+    completed = await queue.wait(job.id, timeout=2.0)
+
+    assert completed.status == "done"
+    assert attempts == ["node-01.local"]
+    assert not any(event.event == "reassigned" for event in queue.events)
 
     await queue.close()
     await client.aclose()

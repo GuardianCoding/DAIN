@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,6 +20,8 @@ from ctl.registry import NodeRegistry
 from ctl.telemetry import TelemetryFanIn
 from infer.spec import ModelSpecUnavailable, scheduler_spec
 from node.discovery import advertise_control_plane
+
+LOG = logging.getLogger("dain.ctl")
 
 # Defaults for GET /api/plan. 8k x 1 session is the demo configuration; the
 # caller must override both to match a differently-launched llama-server.
@@ -53,7 +56,30 @@ class HeartbeatRequest(BaseModel):
 
 
 def request_replan(node_id: str, reason: str) -> None:
-    print(f"Scheduler re-plan requested: node={node_id}, reason={reason}")
+    """Operator-visible trace only. It is NOT how consumers learn of a re-plan.
+
+    The registry already publishes the same fact as structured data: every
+    membership change carries `replan_required=True` on its RegistryEvent, and
+    /feed streams those in order with a sequence number. This log line is for
+    someone reading ctl's stdout; nothing should be built on it.
+
+    ctl deliberately does NOT recompute a plan here:
+
+      - GET /api/plan already recomputes from live membership per request,
+        which is the only moment a plan is known to be valid. A plan cached
+        here would be stale the next time anything moved, and
+        infer.launch._assert_plan_matches_membership exists precisely because
+        --tensor-split is positional over --rpc, so a stale plan silently puts
+        layers on the wrong machines.
+      - ctl could not apply one anyway. llama.cpp fixes --rpc at llama-server
+        start, so acting on a plan means restarting the head — which is
+        scripts/serve_head.py's job, on the head, by the same reasoning that
+        keeps a multi-gigabyte model process out of the control plane.
+      - serve_head.py --watch already closes the loop: it polls membership,
+        debounces cluster.replan_debounce_s, and re-fetches /api/plan on
+        restart when --placement is set.
+    """
+    LOG.info("re-plan required: node=%s reason=%s", node_id, reason)
 
 
 REGISTRY = NodeRegistry(

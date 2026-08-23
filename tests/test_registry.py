@@ -113,9 +113,11 @@ def test_register_is_idempotent():
     assert record.last_heartbeat == 2.0
     assert record.missed_heartbeats == 0
 
-    # Re-registering must not create another joined event.
-    assert len(registry.events) == 1
-    assert registry.events[0].event == "joined"
+    # Re-registering must not create another joined event. It does emit
+    # `readdressed`, because this profile moved to a new host and that changes
+    # the --rpc list a running head was started with — the same (node_id, host)
+    # pair serve_head.py's membership_key() compares.
+    assert [event.event for event in registry.events] == ["joined", "readdressed"]
 
 
 def test_heartbeat_changes_joining_node_to_idle():
@@ -163,6 +165,86 @@ def test_heartbeat_rejects_metrics_for_different_node():
 
     with pytest.raises(ValueError, match="office-01"):
         registry.heartbeat("gpu-01", incorrect_metrics)
+
+
+def test_a_joining_node_requires_a_replan():
+    """Expand invalidates a running head exactly as much as contract does.
+
+    llama.cpp fixes its --rpc list at llama-server start, so a node arriving
+    cannot be used until the head restarts. Flagging only the offline case told
+    a consumer half the truth: the pool grew and nothing said so.
+    """
+    clock = FakeClock()
+    registry = make_registry(clock)
+
+    registry.register(make_profile())
+
+    assert registry.events[0].event == "joined"
+    assert registry.events[0].replan_required is True
+
+
+def test_re_registering_at_the_same_address_is_not_a_membership_change():
+    """A node restarting on the same address leaves --rpc identical, and
+    restarting the head would drop every KV cache for nothing."""
+    clock = FakeClock()
+    registry = make_registry(clock)
+    registry.register(make_profile())
+
+    registry.register(make_profile())
+
+    assert [event.event for event in registry.events] == ["joined"]
+
+
+def test_a_node_returning_on_a_new_address_requires_a_replan():
+    """--tensor-split is positional over the --rpc list, so a node that keeps
+    its id but moves address makes a running head silently wrong."""
+    clock = FakeClock()
+    registry = make_registry(clock)
+    registry.register(make_profile())
+
+    moved = make_profile()
+    moved.host = "10.0.0.99"
+    registry.register(moved)
+
+    assert registry.events[-1].event == "readdressed"
+    assert registry.events[-1].node_id == "gpu-01"
+    assert registry.events[-1].replan_required is True
+
+
+def test_a_recovering_node_requires_a_replan():
+    clock = FakeClock()
+    registry = make_registry(clock)
+    registry.register(make_profile())
+    clock.now = 6.0
+    registry.sweep()
+
+    clock.now = 7.0
+    registry.heartbeat("gpu-01")
+
+    assert registry.events[-1].event == "recovered"
+    assert registry.events[-1].replan_required is True
+
+
+def test_removing_a_node_emits_an_event_that_requires_a_replan():
+    """DELETE /api/nodes/{id} used to be silent on the feed: the topology frame
+    changed but nothing said why, and no consumer learned the head was stale."""
+    clock = FakeClock()
+    registry = make_registry(clock)
+    registry.register(make_profile())
+
+    assert registry.remove("gpu-01") is True
+
+    assert registry.events[-1].event == "removed"
+    assert registry.events[-1].node_id == "gpu-01"
+    assert registry.events[-1].replan_required is True
+
+
+def test_removing_an_unknown_node_emits_nothing():
+    clock = FakeClock()
+    registry = make_registry(clock)
+
+    assert registry.remove("never-existed") is False
+    assert registry.events == []
 
 
 def test_node_goes_offline_after_exactly_three_misses():

@@ -10,6 +10,10 @@ import httpx
 from contracts import Job, NodeProfile
 from ctl.registry import NodeRegistry
 from node.auth import sign_job_request
+from node.bench import BENCH_TIMEOUT_S
+from node.infer import READY_TIMEOUT_S as INFER_READY_TIMEOUT_S
+from node.infer import REQUEST_TIMEOUT_S as INFER_REQUEST_TIMEOUT_S
+from node.sandbox import MAX_TIMEOUT_S as SANDBOX_MAX_TIMEOUT_S
 
 JobKind = Literal["infer", "exec", "index", "search", "bench"]
 
@@ -19,6 +23,40 @@ DEFAULT_ENDPOINTS: dict[JobKind, str] = {
     "index": "/index",
     "search": "/search",
     "bench": "/bench",
+}
+
+# How much longer than the node's own ceiling ctl waits before giving up.
+TIMEOUT_MARGIN_S = 60.0
+
+# A dispatch timeout must EXCEED the node's own ceiling for that kind.
+#
+# Undercut it and the failure is not merely a slow job: a ReadTimeout is an
+# httpx.HTTPError, so _run_shard cannot tell "still working" from "dead". It
+# retries, then walks _ranked_nodes() reassigning the same payload to every
+# remaining node. One 30-second generation becomes the same prompt running on
+# the whole pool at once, returning nothing. Every kind except index used to
+# share the 2.0s default, so /infer and /bench could never complete here.
+#
+# Each bound is derived from the node-side constant rather than written out,
+# so retuning one of those cannot silently reintroduce the gap. The node's own
+# timeouts already produce readable 503s ("llama-server exited with code ...")
+# and those should win; this is only the backstop for a node that has stopped
+# answering entirely.
+#
+# Every kind has an entry so the table is the single complete answer to "how
+# long may this kind take?" — agent/client.py derives its own polling deadline
+# from it, and a missing key there would silently mean "give up immediately".
+DEFAULT_TIMEOUTS_S: dict[JobKind, float] = {
+    # await_ready() polls for model load, then the generation itself.
+    "infer": INFER_READY_TIMEOUT_S + INFER_REQUEST_TIMEOUT_S + TIMEOUT_MARGIN_S,
+    # llama-bench -r 3 on a slow CPU node.
+    "bench": BENCH_TIMEOUT_S + TIMEOUT_MARGIN_S,
+    # The sandbox refuses a per-command timeout above its own maximum.
+    "exec": SANDBOX_MAX_TIMEOUT_S + TIMEOUT_MARGIN_S,
+    # Walking a disk and embedding every file. Overridden by index_timeout_s.
+    "index": 30.0,
+    # One query embedding against an index already in memory.
+    "search": 30.0,
 }
 
 
@@ -57,6 +95,7 @@ class JobQueue:
         per_node_limit: int = 1,
         node_port: int = 9100,
         endpoint_by_kind: dict[JobKind, str] | None = None,
+        timeout_by_kind: dict[JobKind, float] | None = None,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be greater than zero")
@@ -74,6 +113,13 @@ class JobQueue:
         self.per_node_limit = per_node_limit
         self.node_port = node_port
         self.endpoint_by_kind = endpoint_by_kind or DEFAULT_ENDPOINTS.copy()
+        # index_timeout_s predates the table and stays the named knob for that
+        # one kind; an explicit timeout_by_kind wins over both.
+        self.timeout_by_kind: dict[JobKind, float] = {
+            **DEFAULT_TIMEOUTS_S,
+            "index": index_timeout_s,
+            **(timeout_by_kind or {}),
+        }
 
         self.client = client or httpx.AsyncClient(timeout=timeout_s)
         self.owns_client = client is None
@@ -340,9 +386,7 @@ class JobQueue:
                 response = await self.client.post(
                     self._node_url(profile, self.endpoint_by_kind[job.kind]),
                     json=request_body,
-                    timeout=(
-                        self.index_timeout_s if job.kind == "index" else self.timeout_s
-                    ),
+                    timeout=self.timeout_by_kind.get(job.kind, self.timeout_s),
                 )
                 if 400 <= response.status_code < 500:
                     try:

@@ -31,6 +31,7 @@ SHA256SUMS
 HIVE-master-brief.html
 DAIN-master-brief.html
 *-brief.html
+RUNBOOK*
 
 # Build output. llama.cpp is cloned beside the repo, never into it, but guard
 # against it anyway — a stray build/ is hundreds of MB.
