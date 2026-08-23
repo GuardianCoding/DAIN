@@ -31,6 +31,17 @@ export const FEED_URL = resolve(
   `ws://${DEFAULT_CTL_HOST}/feed`,
 );
 
+// The agent runs in its own process (uvicorn agent.service:app --port 8100),
+// separate from ctl for the same reason serve_head.py is: ctl must stay
+// restartable without ending a conversation. So it gets its own address, and
+// it is NOT under /api — that prefix belongs to the control plane.
+const DEFAULT_AGENT_HOST = "127.0.0.1:8100";
+
+export const AGENT_BASE = resolve(
+  process.env.NEXT_PUBLIC_AGENT_URL,
+  `http://${DEFAULT_AGENT_HOST}`,
+);
+
 // ctl serves REST under /api but mounts the socket at bare /feed, so the two
 // URLs are not interchangeable. Dropping /api from the base is the easy
 // mistake: the WebSocket still connects, every REST call 404s, and the UI
