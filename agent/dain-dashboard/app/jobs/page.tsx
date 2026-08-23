@@ -71,7 +71,7 @@ export default function JobsPage() {
               <tr>
                 <th style={{ width: 20 }}></th>
                 <th>Job</th>
-                <th>Kind</th>
+                <th>Type</th>
                 <th>Node(s)</th>
                 <th>Status</th>
                 <th>Duration</th>
@@ -120,7 +120,7 @@ export default function JobsPage() {
                               <p className={styles.mono}>{j.id}</p>
                             </div>
                             <div>
-                              <span className={styles.detailLabel}>Kind</span>
+                              <span className={styles.detailLabel}>Type</span>
                               <p>{j.kind ?? "—"}</p>
                             </div>
                             <div>

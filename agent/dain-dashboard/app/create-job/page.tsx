@@ -223,7 +223,7 @@ export default function CreateJob() {
 
       <form className={styles.card} onSubmit={handleSubmit}>
         <div className={styles.field}>
-          <span className={styles.fieldLabel}>Kind</span>
+          <span className={styles.fieldLabel}>Type</span>
           <div className={styles.kindGrid}>
             {KIND_OPTIONS.map(({ id, label, hint, icon: Icon }) => (
               <button
