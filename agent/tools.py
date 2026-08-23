@@ -25,9 +25,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.client import DainClient, DainError
+from agent.fanout import ask_pool as run_pool
 from infer.spec import known_models
+from node.sandbox import DEFAULT_ALLOWLIST
 
 MIB_PER_GIB = 1024.0
+DEFAULT_SEARCH_LIMIT = 5
+MAX_FANOUT = 16  # ctl.main.JobRequest caps fanout here
+ALLOWED_PROGRAMS = ", ".join(sorted(DEFAULT_ALLOWLIST))
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,135 @@ async def plan_placement(client: DainClient, arguments: dict[str, Any]) -> str:
     )
 
 
+def _job_errors(job: dict[str, Any]) -> list[str]:
+    result = job.get("result") or {}
+    return [
+        str(entry["error"])
+        for entry in (result.get("errors") or [])
+        if isinstance(entry, dict) and entry.get("error")
+    ]
+
+
+async def search_files(client: DainClient, arguments: dict[str, Any]) -> str:
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return "search_files needs a 'query' argument: the text to search for."
+
+    limit = arguments.get("limit", DEFAULT_SEARCH_LIMIT)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        limit = DEFAULT_SEARCH_LIMIT
+
+    # Fan out to the whole pool. Sized against live membership because ctl
+    # refuses a fan-out wider than the nodes it has, and a hardcoded 5 would
+    # start failing the moment a machine drops out mid-demo.
+    nodes = await client.available_nodes()
+    if not nodes:
+        return "No nodes are available to search."
+
+    job = await client.submit_and_wait(
+        "search",
+        {"query": query.strip(), "limit": limit},
+        fanout=min(len(nodes), MAX_FANOUT),
+    )
+
+    result = job.get("result") or {}
+    hits = result.get("hits") or []
+    searched = result.get("nodes_searched") or []
+    errors = _job_errors(job)
+
+    lines: list[str] = []
+    if hits:
+        lines.append(f"{len(hits)} hit(s) across {len(searched)} node(s):")
+        lines.extend(
+            f"  {hit.get('source', 'unknown')} (score {hit.get('score', '?')}): "
+            f"{(hit.get('snippet') or '').strip()[:200]}"
+            for hit in hits
+            if isinstance(hit, dict)
+        )
+    else:
+        lines.append(f"No files matched {query.strip()!r}.")
+
+    # Reported alongside the hits, never instead of them: one cold index must
+    # not discard what the other machines actually found.
+    if errors:
+        lines.append("")
+        lines.append("Some nodes could not search:")
+        lines.extend(f"  {error}" for error in errors)
+
+    return "\n".join(lines)
+
+
+async def run_command(client: DainClient, arguments: dict[str, Any]) -> str:
+    argv = arguments.get("argv")
+    if not isinstance(argv, list) or not argv or not all(
+        isinstance(value, str) for value in argv
+    ):
+        return (
+            "run_command needs 'argv': a list of strings, the program first. "
+            f"Allowed programs: {ALLOWED_PROGRAMS}."
+        )
+
+    # node.sandbox is the real boundary — it re-checks this, runs under
+    # bubblewrap, and rejects escaping paths. Checking here as well is purely
+    # so a refusal comes back as an answer the model can act on instead of
+    # spending a dispatch to learn the same thing.
+    program = argv[0]
+    if program not in DEFAULT_ALLOWLIST:
+        return (
+            f"{program!r} is not on the sandbox allowlist, so it will not run. "
+            f"Allowed programs: {ALLOWED_PROGRAMS}."
+        )
+
+    node = arguments.get("node")
+    job = await client.submit_and_wait(
+        "exec",
+        {"argv": argv},
+        node_id=node if isinstance(node, str) and node.strip() else None,
+    )
+
+    errors = _job_errors(job)
+    if errors:
+        return f"The command failed: {errors[0]}"
+
+    shards = (job.get("result") or {}).get("shards") or []
+    if not shards or not isinstance(shards[0], dict):
+        return "The command returned no output."
+
+    outcome = shards[0].get("result") or {}
+    ran_on = shards[0].get("node_id", "an unknown node")
+    stdout = (outcome.get("stdout") or "").strip()
+    stderr = (outcome.get("stderr") or "").strip()
+
+    lines = [f"Ran on {ran_on}, exit {outcome.get('exit_code', '?')}."]
+    if stdout:
+        lines.append(stdout)
+    if stderr:
+        lines.append(f"stderr: {stderr}")
+    if outcome.get("timed_out"):
+        lines.append("The command hit its timeout and was killed.")
+    return "\n".join(lines)
+
+
+async def ask_pool(client: DainClient, arguments: dict[str, Any]) -> str:
+    prompts = arguments.get("prompts")
+    if not isinstance(prompts, list) or not prompts:
+        return "ask_pool needs 'prompts': a list of strings, one task per entry."
+    if not all(isinstance(prompt, str) and prompt.strip() for prompt in prompts):
+        return "Every entry in 'prompts' must be a non-empty string."
+
+    answers = await run_pool(client, [prompt.strip() for prompt in prompts])
+
+    lines: list[str] = []
+    for answer in answers:
+        if answer.ok:
+            speed = f" at {answer.tok_s} tok/s" if answer.tok_s else ""
+            lines.append(f"[{answer.node_id}{speed}] {answer.text.strip()}")
+        else:
+            where = answer.node_id or "the pool"
+            lines.append(f"[{where}] failed: {answer.error}")
+    return "\n\n".join(lines)
+
+
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="cluster_status",
@@ -223,6 +357,77 @@ TOOLS: tuple[Tool, ...] = (
             "required": ["model"],
         },
         run=plan_placement,
+    ),
+    Tool(
+        name="search_files",
+        description=(
+            "Search the files on every machine in the pool at once, by meaning "
+            "rather than exact wording. Each machine searches its own disk and "
+            "the results are merged, so hits are labelled node:path. Use this "
+            "to find documents, notes or code anywhere in the pool."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to look for, in plain language.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum hits to return. Default 5.",
+                },
+            },
+            "required": ["query"],
+        },
+        run=search_files,
+    ),
+    Tool(
+        name="run_command",
+        description=(
+            "Run a read-only shell command on one machine, sandboxed. Only "
+            f"these programs are permitted: {ALLOWED_PROGRAMS}. Nothing that "
+            "writes files, opens a network connection, or starts another "
+            "program will run. Name a machine with 'node', or omit it and the "
+            "least busy one is chosen."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "argv": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Command and arguments, program first.",
+                },
+                "node": {
+                    "type": "string",
+                    "description": "Node id to run on. Optional.",
+                },
+            },
+            "required": ["argv"],
+        },
+        run=run_command,
+    ),
+    Tool(
+        name="ask_pool",
+        description=(
+            "Send several independent prompts to several machines at once, one "
+            "prompt per machine, and get every answer back. Use this to split a "
+            "job into parts that do not depend on each other. Do not use it for "
+            "a single question — answer that yourself."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "One self-contained task per entry.",
+                }
+            },
+            "required": ["prompts"],
+        },
+        run=ask_pool,
     ),
 )
 

@@ -34,6 +34,11 @@ DEFAULT_CTL = "127.0.0.1:8000"
 DEFAULT_POLL_INTERVAL_S = 0.25
 REQUEST_TIMEOUT_S = 10.0
 
+# contracts.NodeState values the queue refuses to dispatch to. "degraded" is
+# deliberately absent: a degraded node is slow, not gone, and excluding it
+# would shrink the pool during exactly the recovery the demo shows off.
+UNAVAILABLE_STATES = frozenset({"joining", "offline"})
+
 # The third layer of the same invariant the queue's table encodes:
 #
 #     node ceiling  <  queue dispatch timeout  <  agent polling deadline
@@ -117,6 +122,21 @@ class DainClient:
     async def nodes(self) -> list[dict[str, Any]]:
         body = await self._request("GET", "/nodes")
         return body if isinstance(body, list) else []
+
+    async def available_nodes(self) -> list[str]:
+        """Node ids the queue would actually dispatch to, in registry order.
+
+        The same filter ctl.queue._ranked_nodes applies. Asking for a fan-out
+        wider than this is a 503 from ctl ("fan-out N requested but only M
+        node(s) are available"), so callers size their work against it.
+        """
+        return [
+            node["id"]
+            for node in await self.nodes()
+            if isinstance(node, dict)
+            and node.get("id")
+            and node.get("state") not in UNAVAILABLE_STATES
+        ]
 
     async def metrics(self) -> dict[str, Any]:
         body = await self._request("GET", "/metrics")
